@@ -1,6 +1,6 @@
 module github.com/richardmsong/aqua-scan-triggerer
 
-go 1.25.0
+go 1.23
 
 require (
 	k8s.io/api v0.35.0

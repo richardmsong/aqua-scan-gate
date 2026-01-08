@@ -42,6 +42,16 @@ docker-build: ## Build docker image.
 docker-push: ## Push docker image.
 	docker push aqua-scan-gate:latest
 
+.PHONY: docker-buildx-ci
+docker-buildx-ci: ## Build multi-platform docker image for CI using buildx.
+	@echo "Building multi-platform image with tags: $(DOCKER_TAGS)"
+	docker buildx build \
+		--platform linux/amd64,linux/arm64 \
+		$(if $(DOCKER_PUSH),--push,--load) \
+		$(foreach tag,$(DOCKER_TAGS),-t $(REGISTRY)/$(IMAGE_NAME):$(tag)) \
+		-f $(if $(DOCKERFILE),$(DOCKERFILE),Dockerfile) \
+		.
+
 ##@ Deployment
 
 .PHONY: install

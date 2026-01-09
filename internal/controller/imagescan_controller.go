@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -58,8 +59,14 @@ func (r *ImageScanReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 	}
 
+	// Extract registry from image reference or use spec registry
+	registry := imageScan.Spec.Registry
+	if registry == "" {
+		registry = extractRegistry(imageScan.Spec.Image)
+	}
+
 	// Check current scan status in Aqua
-	result, err := r.AquaClient.GetScanResult(ctx, imageScan.Spec.Image, imageScan.Spec.Digest)
+	result, err := r.AquaClient.GetScanResult(ctx, registry, imageScan.Spec.Image)
 	if err != nil {
 		logger.Error(err, "Failed to get scan result from Aqua")
 		imageScan.Status.Phase = securityv1alpha1.ScanPhaseError
@@ -74,7 +81,7 @@ func (r *ImageScanReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	case aqua.StatusNotFound:
 		// Trigger a new scan
 		logger.Info("No existing scan found, triggering new scan", "image", imageScan.Spec.Image)
-		scanID, err := r.AquaClient.TriggerScan(ctx, imageScan.Spec.Image, imageScan.Spec.Digest)
+		scanID, err := r.AquaClient.TriggerScan(ctx, registry, imageScan.Spec.Image)
 		if err != nil {
 			logger.Error(err, "Failed to trigger scan")
 			imageScan.Status.Phase = securityv1alpha1.ScanPhaseError
@@ -147,4 +154,43 @@ func (r *ImageScanReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&securityv1alpha1.ImageScan{}).
 		Complete(r)
+}
+
+// extractRegistry parses the registry from an image reference
+// Returns "Docker Hub" for images without a registry prefix
+func extractRegistry(image string) string {
+	// Remove digest if present
+	if idx := strings.Index(image, "@"); idx != -1 {
+		image = image[:idx]
+	}
+
+	// Remove tag if present
+	if idx := strings.Index(image, ":"); idx != -1 {
+		// Only remove if it's a tag, not a port
+		beforeColon := image[:idx]
+		if !strings.Contains(beforeColon, "/") {
+			// Single name with tag (e.g., nginx:latest)
+			return "Docker Hub"
+		}
+		// Could be registry:port/image or registry/image:tag
+		// Keep the full string for further parsing
+	}
+
+	// Check if it contains a slash
+	if !strings.Contains(image, "/") {
+		// Simple name without registry (e.g., nginx)
+		return "Docker Hub"
+	}
+
+	// Extract the registry part (everything before the first slash after registry)
+	parts := strings.SplitN(image, "/", 2)
+	registry := parts[0]
+
+	// Check if it looks like a registry (has a dot or colon)
+	if strings.Contains(registry, ".") || strings.Contains(registry, ":") {
+		return registry
+	}
+
+	// Otherwise it's likely Docker Hub with namespace (e.g., library/nginx)
+	return "Docker Hub"
 }

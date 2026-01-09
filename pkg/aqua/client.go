@@ -45,7 +45,6 @@ type ScanResult struct {
 	Status     ScanStatus
 	Image      string
 	Registry   string
-	Digest     string
 	Critical   int
 	High       int
 	Medium     int
@@ -268,9 +267,9 @@ func (c *aquaClient) GetScanResult(ctx context.Context, registry, image string) 
 		ImageName  string `json:"image_name"`
 		Registry   string `json:"registry"`
 		Disallowed bool   `json:"disallowed"`
-		ScanDate   string `json:"scan_date"`    // ISO 8601 timestamp
-		ScannedAt  string `json:"scanned_at"`   // Alternative field name
-		LastScan   string `json:"last_scan"`    // Another alternative
+		ScanDate   string `json:"scan_date"`  // ISO 8601 timestamp
+		ScannedAt  string `json:"scanned_at"` // Alternative field name
+		LastScan   string `json:"last_scan"`  // Another alternative
 		CVEsCounts struct {
 			Total        int     `json:"total"`
 			Critical     int     `json:"critical"`

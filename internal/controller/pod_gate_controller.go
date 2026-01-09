@@ -118,8 +118,7 @@ func (r *PodGateReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 					},
 				},
 				Spec: securityv1alpha1.ImageScanSpec{
-					Image:  img.image,
-					Digest: img.digest,
+					Image: img.image,
 				},
 			}
 			if err := r.Create(ctx, &imageScan); err != nil {
@@ -177,8 +176,7 @@ func (r *PodGateReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 }
 
 type imageRef struct {
-	image  string
-	digest string
+	image string
 }
 
 func extractImages(pod *corev1.Pod) []imageRef {
@@ -191,15 +189,8 @@ func extractImages(pod *corev1.Pod) []imageRef {
 		}
 		seen[image] = true
 
-		// Extract digest if present in image reference
-		digest := ""
-		if idx := strings.Index(image, "@sha256:"); idx != -1 {
-			digest = image[idx+1:]
-		}
-
 		images = append(images, imageRef{
-			image:  image,
-			digest: digest,
+			image: image,
 		})
 	}
 
@@ -236,11 +227,7 @@ func removeSchedulingGate(pod *corev1.Pod, gateName string) {
 }
 
 func imageScanName(img imageRef) string {
-	// Use digest if available, otherwise hash the image reference
-	if img.digest != "" {
-		// sha256:abc123... -> sha256-abc123...
-		return strings.ReplaceAll(img.digest, ":", "-")[:63]
-	}
+	// Hash the image reference to create a unique name
 	return fmt.Sprintf("img-%s", hashString(img.image)[:56])
 }
 

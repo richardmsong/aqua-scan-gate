@@ -23,7 +23,11 @@ IMG ?= $(REGISTRY)/$(IMAGE_NAME):latest
 
 # DOCKER_TAGS can be set to override default tags (space-separated for multiple tags)
 # Example: make docker-buildx-ci DOCKER_TAGS="latest v1.0.0 sha-abc1234"
+# Note: Each tag will be applied as $(REGISTRY)/$(IMAGE_NAME):$(tag)
 DOCKER_TAGS ?= latest
+
+# Helper to generate --tag flags for each tag in DOCKER_TAGS
+DOCKER_TAG_FLAGS = $(foreach tag,$(DOCKER_TAGS),--tag $(REGISTRY)/$(IMAGE_NAME):$(tag))
 
 # Setting SHELL to bash allows bash commands to be executed by recipes.
 # Options are set to exit when a recipe line exits non-zero or a piped command fails.
@@ -136,7 +140,7 @@ docker-buildx-ci: docker-setup ## Build and push multi-arch docker image (for CI
 	sed -e '1 s/\(^FROM\)/FROM --platform=\$${BUILDPLATFORM}/; t' -e ' 1,// s//FROM --platform=\$${BUILDPLATFORM}/' Dockerfile > Dockerfile.cross
 	$(CONTAINER_TOOL) buildx build \
 		--platform=$(PLATFORMS) \
-		$(foreach tag,$(DOCKER_TAGS),--tag $(REGISTRY)/$(IMAGE_NAME):$(tag)) \
+		$(DOCKER_TAG_FLAGS) \
 		--push=$(if $(DOCKER_PUSH),true,false) \
 		--cache-from=type=registry,ref=$(REGISTRY)/$(IMAGE_NAME):buildcache \
 		--cache-to=type=registry,ref=$(REGISTRY)/$(IMAGE_NAME):buildcache,mode=max \
@@ -148,7 +152,7 @@ docker-buildx-local: docker-setup ## Build multi-arch docker image locally (no p
 	sed -e '1 s/\(^FROM\)/FROM --platform=\$${BUILDPLATFORM}/; t' -e ' 1,// s//FROM --platform=\$${BUILDPLATFORM}/' Dockerfile > Dockerfile.cross
 	$(CONTAINER_TOOL) buildx build \
 		--platform=$(PLATFORMS) \
-		$(foreach tag,$(DOCKER_TAGS),--tag $(REGISTRY)/$(IMAGE_NAME):$(tag)) \
+		$(DOCKER_TAG_FLAGS) \
 		-f Dockerfile.cross .
 	rm -f Dockerfile.cross
 

@@ -31,3 +31,7 @@ cover.out
 # OS specific
 .DS_Store
 Thumbs.db
+
+# Playwright MCP temporary files
+.playwright-mcp/
+.claude/

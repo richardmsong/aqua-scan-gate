@@ -110,6 +110,15 @@ func NewClient(config Config) Client {
 	}
 }
 
+// closeResponseBody drains and closes the response body to enable HTTP connection reuse.
+// Errors are intentionally discarded as they cannot be meaningfully handled during cleanup.
+func closeResponseBody(body io.ReadCloser) {
+	// Drain any remaining content to allow connection reuse
+	_, _ = io.Copy(io.Discard, body)
+	// Close the body, ignoring any errors as this is cleanup code
+	_ = body.Close()
+}
+
 // getBaseURL returns the base URL for the Aqua API based on region or custom URL
 func (c *aquaClient) getBaseURL() string {
 	if c.config.BaseURL != "" {
@@ -169,12 +178,7 @@ func (c *aquaClient) authenticate(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("executing auth request: %w", err)
 	}
-	defer func() {
-		if closeErr := resp.Body.Close(); closeErr != nil {
-			// Log close error - indicates potential resource leak
-			_ = closeErr
-		}
-	}()
+	defer closeResponseBody(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -246,12 +250,7 @@ func (c *aquaClient) GetScanResult(ctx context.Context, registry, image string) 
 	if err != nil {
 		return nil, fmt.Errorf("executing request: %w", err)
 	}
-	defer func() {
-		if closeErr := resp.Body.Close(); closeErr != nil {
-			// Log close error - indicates potential resource leak
-			_ = closeErr
-		}
-	}()
+	defer closeResponseBody(resp.Body)
 
 	if resp.StatusCode == http.StatusNotFound {
 		return &ScanResult{
@@ -350,12 +349,7 @@ func (c *aquaClient) TriggerScan(ctx context.Context, registry, image string) (s
 	if err != nil {
 		return "", fmt.Errorf("executing request: %w", err)
 	}
-	defer func() {
-		if closeErr := resp.Body.Close(); closeErr != nil {
-			// Log close error - indicates potential resource leak
-			_ = closeErr
-		}
-	}()
+	defer closeResponseBody(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("scan trigger failed with status: %d", resp.StatusCode)
@@ -399,12 +393,7 @@ func (c *aquaClient) GetScanStatus(ctx context.Context, registry, image string) 
 	if err != nil {
 		return nil, fmt.Errorf("executing request: %w", err)
 	}
-	defer func() {
-		if closeErr := resp.Body.Close(); closeErr != nil {
-			// Log close error - indicates potential resource leak
-			_ = closeErr
-		}
-	}()
+	defer closeResponseBody(resp.Body)
 
 	if resp.StatusCode == http.StatusNotFound {
 		return &ScanResult{

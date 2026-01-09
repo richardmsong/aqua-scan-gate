@@ -4,8 +4,10 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"testing"
 	"time"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 )
 
 // Test fixtures for mocking Aqua API responses
@@ -86,589 +88,689 @@ func mockScanStatusFailed() string {
 	return `{"status": "Fail"}`
 }
 
-// TestNewClient verifies client initialization
-func TestNewClient(t *testing.T) {
-	tests := []struct {
-		name           string
-		config         Config
-		expectedRegion string
-	}{
-		{
-			name: "US region client",
-			config: Config{
-				Region:    "us",
-				APIKey:    "test-key",
-				APISecret: "test-secret",
-			},
-			expectedRegion: "us",
-		},
-		{
-			name: "EU region client",
-			config: Config{
-				Region:    "eu",
-				APIKey:    "test-key",
-				APISecret: "test-secret",
-			},
-			expectedRegion: "eu",
-		},
-		{
-			name: "Client with custom timeout",
-			config: Config{
-				Region:    "us",
-				APIKey:    "test-key",
-				APISecret: "test-secret",
-				Timeout:   60 * time.Second,
-			},
-			expectedRegion: "us",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			client := NewClient(tt.config)
-			if client == nil {
-				t.Fatal("Expected non-nil client")
-			}
-
-			aquaClient, ok := client.(*aquaClient)
-			if !ok {
-				t.Fatal("Expected aquaClient type")
-			}
-
-			if aquaClient.config.Region != tt.expectedRegion {
-				t.Errorf("Expected region %s, got %s", tt.expectedRegion, aquaClient.config.Region)
-			}
-
-			if aquaClient.config.Timeout == 0 {
-				t.Error("Expected non-zero timeout")
-			}
-		})
-	}
-}
-
-// TestAuthenticate verifies token generation
-func TestAuthenticate(t *testing.T) {
-	tests := []struct {
-		name           string
-		mockResponse   string
-		mockStatusCode int
-		expectError    bool
-	}{
-		{
-			name:           "successful authentication",
-			mockResponse:   mockTokenResponse(),
-			mockStatusCode: http.StatusOK,
-			expectError:    false,
-		},
-		{
-			name:           "authentication failure",
-			mockResponse:   `{"status": 401, "message": "Invalid credentials"}`,
-			mockStatusCode: http.StatusUnauthorized,
-			expectError:    true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				// Verify authentication headers
-				if r.Header.Get("X-API-Key") == "" {
-					t.Error("Missing X-API-Key header")
-				}
-				if r.Header.Get("X-Timestamp") == "" {
-					t.Error("Missing X-Timestamp header")
-				}
-				if r.Header.Get("X-Signature") == "" {
-					t.Error("Missing X-Signature header")
+var _ = Describe("Aqua Client", func() {
+	Describe("Client Initialization", func() {
+		Context("when creating a new client", func() {
+			It("should create a US region client", func() {
+				config := Config{
+					Region:    "us",
+					APIKey:    "test-key",
+					APISecret: "test-secret",
 				}
 
-				w.WriteHeader(tt.mockStatusCode)
-				_, _ = w.Write([]byte(tt.mockResponse))
-			}))
-			defer server.Close()
+				client := NewClient(config)
+				Expect(client).NotTo(BeNil())
 
-			client := NewClient(Config{
-				BaseURL:   server.URL,
-				Region:    "us",
-				APIKey:    "test-key",
-				APISecret: "test-secret",
+				aquaClient, ok := client.(*aquaClient)
+				Expect(ok).To(BeTrue())
+				Expect(aquaClient.config.Region).To(Equal("us"))
+				Expect(aquaClient.config.Timeout).NotTo(BeZero())
 			})
 
-			aquaClient := client.(*aquaClient)
-			err := aquaClient.authenticate(context.Background())
-
-			if tt.expectError && err == nil {
-				t.Error("Expected error but got none")
-			}
-			if !tt.expectError && err != nil {
-				t.Errorf("Unexpected error: %v", err)
-			}
-			if !tt.expectError && aquaClient.token == "" {
-				t.Error("Expected token to be set")
-			}
-		})
-	}
-}
-
-// TestGetScanResult verifies retrieving scan results
-func TestGetScanResult(t *testing.T) {
-	tests := []struct {
-		name           string
-		registry       string
-		image          string
-		mockResponse   string
-		mockStatusCode int
-		expectError    bool
-		expectedStatus ScanStatus
-	}{
-		{
-			name:           "successful scan result retrieval",
-			registry:       "Docker Hub",
-			image:          "nginx:latest",
-			mockResponse:   mockScanResultResponse(),
-			mockStatusCode: http.StatusOK,
-			expectError:    false,
-			expectedStatus: StatusCompleted,
-		},
-		{
-			name:           "scan result with critical vulnerabilities",
-			registry:       "Docker Hub",
-			image:          "vulnerable:latest",
-			mockResponse:   mockScanResultWithCriticalVulns(),
-			mockStatusCode: http.StatusOK,
-			expectError:    false,
-			expectedStatus: StatusCompleted,
-		},
-		{
-			name:           "image not found",
-			registry:       "Docker Hub",
-			image:          "nonexistent:latest",
-			mockResponse:   "",
-			mockStatusCode: http.StatusNotFound,
-			expectError:    false,
-			expectedStatus: StatusNotFound,
-		},
-		{
-			name:           "server error",
-			registry:       "Docker Hub",
-			image:          "nginx:latest",
-			mockResponse:   `{"status": 500, "message": "Internal server error"}`,
-			mockStatusCode: http.StatusInternalServerError,
-			expectError:    true,
-			expectedStatus: "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			callCount := 0
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				callCount++
-
-				// First call is for authentication
-				if callCount == 1 {
-					w.WriteHeader(http.StatusOK)
-					_, _ = w.Write([]byte(mockTokenResponse()))
-					return
+			It("should create a EU region client", func() {
+				config := Config{
+					Region:    "eu",
+					APIKey:    "test-key",
+					APISecret: "test-secret",
 				}
 
-				// Verify authorization header
-				if r.Header.Get("Authorization") == "" {
-					t.Error("Missing Authorization header")
-				}
+				client := NewClient(config)
+				Expect(client).NotTo(BeNil())
 
-				w.WriteHeader(tt.mockStatusCode)
-				if tt.mockResponse != "" {
-					_, _ = w.Write([]byte(tt.mockResponse))
-				}
-			}))
-			defer server.Close()
-
-			client := NewClient(Config{
-				BaseURL:   server.URL,
-				Region:    "us",
-				APIKey:    "test-key",
-				APISecret: "test-secret",
+				aquaClient, ok := client.(*aquaClient)
+				Expect(ok).To(BeTrue())
+				Expect(aquaClient.config.Region).To(Equal("eu"))
 			})
 
-			result, err := client.GetScanResult(context.Background(), tt.registry, tt.image)
-
-			if tt.expectError && err == nil {
-				t.Error("Expected error but got none")
-			}
-			if !tt.expectError && err != nil {
-				t.Errorf("Unexpected error: %v", err)
-			}
-			if !tt.expectError && result != nil {
-				if result.Status != tt.expectedStatus {
-					t.Errorf("Expected status %s, got %s", tt.expectedStatus, result.Status)
-				}
-			}
-		})
-	}
-}
-
-// TestTriggerScan verifies scan initiation
-func TestTriggerScan(t *testing.T) {
-	tests := []struct {
-		name           string
-		registry       string
-		image          string
-		mockStatusCode int
-		expectError    bool
-	}{
-		{
-			name:           "successful scan trigger",
-			registry:       "Docker Hub",
-			image:          "nginx:latest",
-			mockStatusCode: http.StatusOK,
-			expectError:    false,
-		},
-		{
-			name:           "scan trigger with URL encoding",
-			registry:       "Private Registry",
-			image:          "my-app:v1.0",
-			mockStatusCode: http.StatusOK,
-			expectError:    false,
-		},
-		{
-			name:           "authentication failure",
-			registry:       "Docker Hub",
-			image:          "nginx:latest",
-			mockStatusCode: http.StatusUnauthorized,
-			expectError:    true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			callCount := 0
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				callCount++
-
-				// First call is for authentication
-				if callCount == 1 {
-					w.WriteHeader(http.StatusOK)
-					_, _ = w.Write([]byte(mockTokenResponse()))
-					return
+			It("should create a client with custom timeout", func() {
+				config := Config{
+					Region:    "us",
+					APIKey:    "test-key",
+					APISecret: "test-secret",
+					Timeout:   60 * time.Second,
 				}
 
-				// Verify it's a POST request
-				if r.Method != http.MethodPost {
-					t.Errorf("Expected POST request, got %s", r.Method)
-				}
+				client := NewClient(config)
+				Expect(client).NotTo(BeNil())
 
-				// Verify authorization header
-				if r.Header.Get("Authorization") == "" {
-					t.Error("Missing Authorization header")
-				}
-
-				w.WriteHeader(tt.mockStatusCode)
-			}))
-			defer server.Close()
-
-			client := NewClient(Config{
-				BaseURL:   server.URL,
-				Region:    "us",
-				APIKey:    "test-key",
-				APISecret: "test-secret",
+				aquaClient, ok := client.(*aquaClient)
+				Expect(ok).To(BeTrue())
+				Expect(aquaClient.config.Timeout).To(Equal(60 * time.Second))
 			})
-
-			scanID, err := client.TriggerScan(context.Background(), tt.registry, tt.image)
-
-			if tt.expectError && err == nil {
-				t.Error("Expected error but got none")
-			}
-			if !tt.expectError && err != nil {
-				t.Errorf("Unexpected error: %v", err)
-			}
-			if !tt.expectError && scanID == "" {
-				t.Error("Expected non-empty scan ID")
-			}
 		})
-	}
-}
-
-// TestGetScanStatus verifies scan status checking
-func TestGetScanStatus(t *testing.T) {
-	tests := []struct {
-		name           string
-		registry       string
-		image          string
-		mockResponse   string
-		mockStatusCode int
-		expectError    bool
-		expectedStatus ScanStatus
-	}{
-		{
-			name:           "scan completed",
-			registry:       "Docker Hub",
-			image:          "nginx:latest",
-			mockResponse:   mockScanStatusScanned(),
-			mockStatusCode: http.StatusOK,
-			expectError:    false,
-			expectedStatus: StatusCompleted,
-		},
-		{
-			name:           "scan pending",
-			registry:       "Docker Hub",
-			image:          "nginx:latest",
-			mockResponse:   mockScanStatusPending(),
-			mockStatusCode: http.StatusOK,
-			expectError:    false,
-			expectedStatus: StatusQueued,
-		},
-		{
-			name:           "scan in progress",
-			registry:       "Docker Hub",
-			image:          "nginx:latest",
-			mockResponse:   mockScanStatusInProgress(),
-			mockStatusCode: http.StatusOK,
-			expectError:    false,
-			expectedStatus: StatusScanning,
-		},
-		{
-			name:           "scan failed",
-			registry:       "Docker Hub",
-			image:          "nginx:latest",
-			mockResponse:   mockScanStatusFailed(),
-			mockStatusCode: http.StatusOK,
-			expectError:    false,
-			expectedStatus: StatusFailed,
-		},
-		{
-			name:           "image not found",
-			registry:       "Docker Hub",
-			image:          "nonexistent:latest",
-			mockResponse:   "",
-			mockStatusCode: http.StatusNotFound,
-			expectError:    false,
-			expectedStatus: StatusNotFound,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			callCount := 0
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				callCount++
-
-				// First call is for authentication
-				if callCount == 1 {
-					w.WriteHeader(http.StatusOK)
-					_, _ = w.Write([]byte(mockTokenResponse()))
-					return
-				}
-
-				w.WriteHeader(tt.mockStatusCode)
-				if tt.mockResponse != "" {
-					_, _ = w.Write([]byte(tt.mockResponse))
-				}
-			}))
-			defer server.Close()
-
-			client := NewClient(Config{
-				BaseURL:   server.URL,
-				Region:    "us",
-				APIKey:    "test-key",
-				APISecret: "test-secret",
-			})
-
-			result, err := client.GetScanStatus(context.Background(), tt.registry, tt.image)
-
-			if tt.expectError && err == nil {
-				t.Error("Expected error but got none")
-			}
-			if !tt.expectError && err != nil {
-				t.Errorf("Unexpected error: %v", err)
-			}
-			if !tt.expectError && result != nil {
-				if result.Status != tt.expectedStatus {
-					t.Errorf("Expected status %s, got %s", tt.expectedStatus, result.Status)
-				}
-			}
-		})
-	}
-}
-
-// TestTokenExpiration verifies token refresh logic
-func TestTokenExpiration(t *testing.T) {
-	callCount := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
-
-		// Authentication calls
-		if r.URL.Path == "/v2/tokens" {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(mockTokenResponse()))
-			return
-		}
-
-		// API calls
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(mockScanStatusScanned()))
-	}))
-	defer server.Close()
-
-	client := NewClient(Config{
-		BaseURL:   server.URL,
-		Region:    "us",
-		APIKey:    "test-key",
-		APISecret: "test-secret",
 	})
 
-	aquaClient := client.(*aquaClient)
+	Describe("Authentication", func() {
+		var server *httptest.Server
 
-	// First call - should authenticate
-	_, err := client.GetScanStatus(context.Background(), "Docker Hub", "nginx:latest")
-	if err != nil {
-		t.Fatalf("First call failed: %v", err)
-	}
-
-	// Expire the token
-	aquaClient.tokenExpiry = time.Now().Add(-1 * time.Minute)
-
-	// Second call - should re-authenticate
-	_, err = client.GetScanStatus(context.Background(), "Docker Hub", "nginx:latest")
-	if err != nil {
-		t.Fatalf("Second call failed: %v", err)
-	}
-
-	// Should have called authentication twice
-	authCallCount := 0
-	for i := 1; i <= callCount; i++ {
-		if i == 1 || i == 3 {
-			authCallCount++
-		}
-	}
-
-	if authCallCount < 2 {
-		t.Error("Expected token to be refreshed on expiration")
-	}
-}
-
-// TestContextCancellation verifies context handling
-func TestContextCancellation(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Simulate slow response
-		time.Sleep(100 * time.Millisecond)
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(mockTokenResponse()))
-	}))
-	defer server.Close()
-
-	client := NewClient(Config{
-		BaseURL:   server.URL,
-		Region:    "us",
-		APIKey:    "test-key",
-		APISecret: "test-secret",
-		Timeout:   50 * time.Millisecond,
-	})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-	defer cancel()
-
-	_, err := client.GetScanStatus(ctx, "Docker Hub", "nginx:latest")
-	if err == nil {
-		t.Error("Expected context cancellation error")
-	}
-}
-
-// TestInvalidJSON verifies error handling for malformed responses
-func TestInvalidJSON(t *testing.T) {
-	callCount := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
-
-		// First call is for authentication
-		if callCount == 1 {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(mockTokenResponse()))
-			return
-		}
-
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("invalid json"))
-	}))
-	defer server.Close()
-
-	client := NewClient(Config{
-		BaseURL:   server.URL,
-		Region:    "us",
-		APIKey:    "test-key",
-		APISecret: "test-secret",
-	})
-
-	_, err := client.GetScanResult(context.Background(), "Docker Hub", "nginx:latest")
-	if err == nil {
-		t.Error("Expected JSON decode error")
-	}
-}
-
-// TestParseImageReference verifies image reference parsing
-func TestParseImageReference(t *testing.T) {
-	tests := []struct {
-		name              string
-		imageRef          string
-		expectedRegistry  string
-		expectedRepo      string
-		expectedTag       string
-		expectError       bool
-	}{
-		{
-			name:             "docker hub image with tag",
-			imageRef:         "nginx:latest",
-			expectedRegistry: "Docker Hub",
-			expectedRepo:     "nginx",
-			expectedTag:      "latest",
-			expectError:      false,
-		},
-		{
-			name:             "docker hub image without tag",
-			imageRef:         "nginx",
-			expectedRegistry: "Docker Hub",
-			expectedRepo:     "nginx",
-			expectedTag:      "latest",
-			expectError:      false,
-		},
-		{
-			name:             "private registry with port",
-			imageRef:         "registry.io:5000/myapp:v1.0",
-			expectedRegistry: "registry.io:5000",
-			expectedRepo:     "myapp",
-			expectedTag:      "v1.0",
-			expectError:      false,
-		},
-		{
-			name:             "gcr image",
-			imageRef:         "gcr.io/project/image:tag",
-			expectedRegistry: "gcr.io",
-			expectedRepo:     "project/image",
-			expectedTag:      "tag",
-			expectError:      false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			registry, repo, tag, err := parseImageReference(tt.imageRef)
-
-			if tt.expectError && err == nil {
-				t.Error("Expected error but got none")
-			}
-			if !tt.expectError && err != nil {
-				t.Errorf("Unexpected error: %v", err)
-			}
-
-			if registry != tt.expectedRegistry {
-				t.Errorf("Expected registry %s, got %s", tt.expectedRegistry, registry)
-			}
-			if repo != tt.expectedRepo {
-				t.Errorf("Expected repo %s, got %s", tt.expectedRepo, repo)
-			}
-			if tag != tt.expectedTag {
-				t.Errorf("Expected tag %s, got %s", tt.expectedTag, tag)
+		AfterEach(func() {
+			if server != nil {
+				server.Close()
 			}
 		})
-	}
-}
+
+		Context("when authenticating with valid credentials", func() {
+			BeforeEach(func() {
+				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					// Verify authentication headers
+					Expect(r.Header.Get("X-API-Key")).NotTo(BeEmpty())
+					Expect(r.Header.Get("X-Timestamp")).NotTo(BeEmpty())
+					Expect(r.Header.Get("X-Signature")).NotTo(BeEmpty())
+
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(mockTokenResponse()))
+				}))
+			})
+
+			It("should successfully authenticate and set token", func() {
+				client := NewClient(Config{
+					BaseURL:   server.URL,
+					Region:    "us",
+					APIKey:    "test-key",
+					APISecret: "test-secret",
+				})
+
+				aquaClient := client.(*aquaClient)
+				err := aquaClient.authenticate(context.Background())
+
+				Expect(err).NotTo(HaveOccurred())
+				Expect(aquaClient.token).NotTo(BeEmpty())
+			})
+		})
+
+		Context("when authentication fails", func() {
+			BeforeEach(func() {
+				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusUnauthorized)
+					_, _ = w.Write([]byte(`{"status": 401, "message": "Invalid credentials"}`))
+				}))
+			})
+
+			It("should return an error", func() {
+				client := NewClient(Config{
+					BaseURL:   server.URL,
+					Region:    "us",
+					APIKey:    "test-key",
+					APISecret: "test-secret",
+				})
+
+				aquaClient := client.(*aquaClient)
+				err := aquaClient.authenticate(context.Background())
+
+				Expect(err).To(HaveOccurred())
+			})
+		})
+	})
+
+	Describe("GetScanResult", func() {
+		var server *httptest.Server
+		var callCount int
+
+		AfterEach(func() {
+			if server != nil {
+				server.Close()
+			}
+		})
+
+		Context("when retrieving scan results successfully", func() {
+			BeforeEach(func() {
+				callCount = 0
+				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					callCount++
+
+					if callCount == 1 {
+						w.WriteHeader(http.StatusOK)
+						_, _ = w.Write([]byte(mockTokenResponse()))
+						return
+					}
+
+					Expect(r.Header.Get("Authorization")).NotTo(BeEmpty())
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(mockScanResultResponse()))
+				}))
+			})
+
+			It("should return scan result with vulnerability counts", func() {
+				client := NewClient(Config{
+					BaseURL:   server.URL,
+					Region:    "us",
+					APIKey:    "test-key",
+					APISecret: "test-secret",
+				})
+
+				result, err := client.GetScanResult(context.Background(), "Docker Hub", "nginx:latest")
+
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).NotTo(BeNil())
+				Expect(result.Status).To(Equal(StatusCompleted))
+			})
+		})
+
+		Context("when retrieving scan result with critical vulnerabilities", func() {
+			BeforeEach(func() {
+				callCount = 0
+				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					callCount++
+
+					if callCount == 1 {
+						w.WriteHeader(http.StatusOK)
+						_, _ = w.Write([]byte(mockTokenResponse()))
+						return
+					}
+
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(mockScanResultWithCriticalVulns()))
+				}))
+			})
+
+			It("should return scan result with critical vulnerabilities", func() {
+				client := NewClient(Config{
+					BaseURL:   server.URL,
+					Region:    "us",
+					APIKey:    "test-key",
+					APISecret: "test-secret",
+				})
+
+				result, err := client.GetScanResult(context.Background(), "Docker Hub", "vulnerable:latest")
+
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).NotTo(BeNil())
+				Expect(result.Status).To(Equal(StatusCompleted))
+			})
+		})
+
+		Context("when image is not found", func() {
+			BeforeEach(func() {
+				callCount = 0
+				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					callCount++
+
+					if callCount == 1 {
+						w.WriteHeader(http.StatusOK)
+						_, _ = w.Write([]byte(mockTokenResponse()))
+						return
+					}
+
+					w.WriteHeader(http.StatusNotFound)
+				}))
+			})
+
+			It("should return StatusNotFound", func() {
+				client := NewClient(Config{
+					BaseURL:   server.URL,
+					Region:    "us",
+					APIKey:    "test-key",
+					APISecret: "test-secret",
+				})
+
+				result, err := client.GetScanResult(context.Background(), "Docker Hub", "nonexistent:latest")
+
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).NotTo(BeNil())
+				Expect(result.Status).To(Equal(StatusNotFound))
+			})
+		})
+
+		Context("when server returns an error", func() {
+			BeforeEach(func() {
+				callCount = 0
+				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					callCount++
+
+					if callCount == 1 {
+						w.WriteHeader(http.StatusOK)
+						_, _ = w.Write([]byte(mockTokenResponse()))
+						return
+					}
+
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = w.Write([]byte(`{"status": 500, "message": "Internal server error"}`))
+				}))
+			})
+
+			It("should return an error", func() {
+				client := NewClient(Config{
+					BaseURL:   server.URL,
+					Region:    "us",
+					APIKey:    "test-key",
+					APISecret: "test-secret",
+				})
+
+				_, err := client.GetScanResult(context.Background(), "Docker Hub", "nginx:latest")
+
+				Expect(err).To(HaveOccurred())
+			})
+		})
+	})
+
+	Describe("TriggerScan", func() {
+		var server *httptest.Server
+		var callCount int
+
+		AfterEach(func() {
+			if server != nil {
+				server.Close()
+			}
+		})
+
+		Context("when triggering a scan successfully", func() {
+			BeforeEach(func() {
+				callCount = 0
+				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					callCount++
+
+					if callCount == 1 {
+						w.WriteHeader(http.StatusOK)
+						_, _ = w.Write([]byte(mockTokenResponse()))
+						return
+					}
+
+					Expect(r.Method).To(Equal(http.MethodPost))
+					Expect(r.Header.Get("Authorization")).NotTo(BeEmpty())
+
+					w.WriteHeader(http.StatusOK)
+				}))
+			})
+
+			It("should trigger scan for Docker Hub image", func() {
+				client := NewClient(Config{
+					BaseURL:   server.URL,
+					Region:    "us",
+					APIKey:    "test-key",
+					APISecret: "test-secret",
+				})
+
+				scanID, err := client.TriggerScan(context.Background(), "Docker Hub", "nginx:latest")
+
+				Expect(err).NotTo(HaveOccurred())
+				Expect(scanID).NotTo(BeEmpty())
+			})
+
+			It("should trigger scan with URL encoding", func() {
+				client := NewClient(Config{
+					BaseURL:   server.URL,
+					Region:    "us",
+					APIKey:    "test-key",
+					APISecret: "test-secret",
+				})
+
+				scanID, err := client.TriggerScan(context.Background(), "Private Registry", "my-app:v1.0")
+
+				Expect(err).NotTo(HaveOccurred())
+				Expect(scanID).NotTo(BeEmpty())
+			})
+		})
+
+		Context("when authentication fails during scan trigger", func() {
+			BeforeEach(func() {
+				callCount = 0
+				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					callCount++
+
+					if callCount == 1 {
+						w.WriteHeader(http.StatusOK)
+						_, _ = w.Write([]byte(mockTokenResponse()))
+						return
+					}
+
+					w.WriteHeader(http.StatusUnauthorized)
+				}))
+			})
+
+			It("should return an error", func() {
+				client := NewClient(Config{
+					BaseURL:   server.URL,
+					Region:    "us",
+					APIKey:    "test-key",
+					APISecret: "test-secret",
+				})
+
+				_, err := client.TriggerScan(context.Background(), "Docker Hub", "nginx:latest")
+
+				Expect(err).To(HaveOccurred())
+			})
+		})
+	})
+
+	Describe("GetScanStatus", func() {
+		var server *httptest.Server
+		var callCount int
+
+		AfterEach(func() {
+			if server != nil {
+				server.Close()
+			}
+		})
+
+		Context("when scan is completed", func() {
+			BeforeEach(func() {
+				callCount = 0
+				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					callCount++
+
+					if callCount == 1 {
+						w.WriteHeader(http.StatusOK)
+						_, _ = w.Write([]byte(mockTokenResponse()))
+						return
+					}
+
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(mockScanStatusScanned()))
+				}))
+			})
+
+			It("should return StatusCompleted", func() {
+				client := NewClient(Config{
+					BaseURL:   server.URL,
+					Region:    "us",
+					APIKey:    "test-key",
+					APISecret: "test-secret",
+				})
+
+				result, err := client.GetScanStatus(context.Background(), "Docker Hub", "nginx:latest")
+
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).NotTo(BeNil())
+				Expect(result.Status).To(Equal(StatusCompleted))
+			})
+		})
+
+		Context("when scan is pending", func() {
+			BeforeEach(func() {
+				callCount = 0
+				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					callCount++
+
+					if callCount == 1 {
+						w.WriteHeader(http.StatusOK)
+						_, _ = w.Write([]byte(mockTokenResponse()))
+						return
+					}
+
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(mockScanStatusPending()))
+				}))
+			})
+
+			It("should return StatusQueued", func() {
+				client := NewClient(Config{
+					BaseURL:   server.URL,
+					Region:    "us",
+					APIKey:    "test-key",
+					APISecret: "test-secret",
+				})
+
+				result, err := client.GetScanStatus(context.Background(), "Docker Hub", "nginx:latest")
+
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).NotTo(BeNil())
+				Expect(result.Status).To(Equal(StatusQueued))
+			})
+		})
+
+		Context("when scan is in progress", func() {
+			BeforeEach(func() {
+				callCount = 0
+				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					callCount++
+
+					if callCount == 1 {
+						w.WriteHeader(http.StatusOK)
+						_, _ = w.Write([]byte(mockTokenResponse()))
+						return
+					}
+
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(mockScanStatusInProgress()))
+				}))
+			})
+
+			It("should return StatusScanning", func() {
+				client := NewClient(Config{
+					BaseURL:   server.URL,
+					Region:    "us",
+					APIKey:    "test-key",
+					APISecret: "test-secret",
+				})
+
+				result, err := client.GetScanStatus(context.Background(), "Docker Hub", "nginx:latest")
+
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).NotTo(BeNil())
+				Expect(result.Status).To(Equal(StatusScanning))
+			})
+		})
+
+		Context("when scan failed", func() {
+			BeforeEach(func() {
+				callCount = 0
+				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					callCount++
+
+					if callCount == 1 {
+						w.WriteHeader(http.StatusOK)
+						_, _ = w.Write([]byte(mockTokenResponse()))
+						return
+					}
+
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(mockScanStatusFailed()))
+				}))
+			})
+
+			It("should return StatusFailed", func() {
+				client := NewClient(Config{
+					BaseURL:   server.URL,
+					Region:    "us",
+					APIKey:    "test-key",
+					APISecret: "test-secret",
+				})
+
+				result, err := client.GetScanStatus(context.Background(), "Docker Hub", "nginx:latest")
+
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).NotTo(BeNil())
+				Expect(result.Status).To(Equal(StatusFailed))
+			})
+		})
+
+		Context("when image is not found", func() {
+			BeforeEach(func() {
+				callCount = 0
+				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					callCount++
+
+					if callCount == 1 {
+						w.WriteHeader(http.StatusOK)
+						_, _ = w.Write([]byte(mockTokenResponse()))
+						return
+					}
+
+					w.WriteHeader(http.StatusNotFound)
+				}))
+			})
+
+			It("should return StatusNotFound", func() {
+				client := NewClient(Config{
+					BaseURL:   server.URL,
+					Region:    "us",
+					APIKey:    "test-key",
+					APISecret: "test-secret",
+				})
+
+				result, err := client.GetScanStatus(context.Background(), "Docker Hub", "nonexistent:latest")
+
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).NotTo(BeNil())
+				Expect(result.Status).To(Equal(StatusNotFound))
+			})
+		})
+	})
+
+	Describe("Token Management", func() {
+		var server *httptest.Server
+		var callCount int
+
+		AfterEach(func() {
+			if server != nil {
+				server.Close()
+			}
+		})
+
+		Context("when token expires", func() {
+			BeforeEach(func() {
+				callCount = 0
+				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					callCount++
+
+					if r.URL.Path == "/v2/tokens" {
+						w.WriteHeader(http.StatusOK)
+						_, _ = w.Write([]byte(mockTokenResponse()))
+						return
+					}
+
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(mockScanStatusScanned()))
+				}))
+			})
+
+			It("should re-authenticate when token expires", func() {
+				client := NewClient(Config{
+					BaseURL:   server.URL,
+					Region:    "us",
+					APIKey:    "test-key",
+					APISecret: "test-secret",
+				})
+
+				aquaClient := client.(*aquaClient)
+
+				// First call - should authenticate
+				_, err := client.GetScanStatus(context.Background(), "Docker Hub", "nginx:latest")
+				Expect(err).NotTo(HaveOccurred())
+
+				// Expire the token
+				aquaClient.tokenExpiry = time.Now().Add(-1 * time.Minute)
+
+				// Second call - should re-authenticate
+				_, err = client.GetScanStatus(context.Background(), "Docker Hub", "nginx:latest")
+				Expect(err).NotTo(HaveOccurred())
+
+				// Should have multiple calls (including auth)
+				Expect(callCount).To(BeNumerically(">", 2))
+			})
+		})
+	})
+
+	Describe("Error Handling", func() {
+		var server *httptest.Server
+
+		AfterEach(func() {
+			if server != nil {
+				server.Close()
+			}
+		})
+
+		Context("when context is cancelled", func() {
+			BeforeEach(func() {
+				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					// Simulate slow response
+					time.Sleep(100 * time.Millisecond)
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(mockTokenResponse()))
+				}))
+			})
+
+			It("should return context cancellation error", func() {
+				client := NewClient(Config{
+					BaseURL:   server.URL,
+					Region:    "us",
+					APIKey:    "test-key",
+					APISecret: "test-secret",
+					Timeout:   50 * time.Millisecond,
+				})
+
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+				defer cancel()
+
+				_, err := client.GetScanStatus(ctx, "Docker Hub", "nginx:latest")
+				Expect(err).To(HaveOccurred())
+			})
+		})
+
+		Context("when receiving invalid JSON response", func() {
+			var callCount int
+
+			BeforeEach(func() {
+				callCount = 0
+				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					callCount++
+
+					if callCount == 1 {
+						w.WriteHeader(http.StatusOK)
+						_, _ = w.Write([]byte(mockTokenResponse()))
+						return
+					}
+
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte("invalid json"))
+				}))
+			})
+
+			It("should return JSON decode error", func() {
+				client := NewClient(Config{
+					BaseURL:   server.URL,
+					Region:    "us",
+					APIKey:    "test-key",
+					APISecret: "test-secret",
+				})
+
+				_, err := client.GetScanResult(context.Background(), "Docker Hub", "nginx:latest")
+				Expect(err).To(HaveOccurred())
+			})
+		})
+	})
+
+	Describe("Image Reference Parsing", func() {
+		type parseTestCase struct {
+			imageRef         string
+			expectedRegistry string
+			expectedRepo     string
+			expectedTag      string
+		}
+
+		DescribeTable("parsing different image references",
+			func(tc parseTestCase) {
+				registry, repo, tag, err := parseImageReference(tc.imageRef)
+
+				Expect(err).NotTo(HaveOccurred())
+				Expect(registry).To(Equal(tc.expectedRegistry))
+				Expect(repo).To(Equal(tc.expectedRepo))
+				Expect(tag).To(Equal(tc.expectedTag))
+			},
+			Entry("Docker Hub image with tag", parseTestCase{
+				imageRef:         "nginx:latest",
+				expectedRegistry: "Docker Hub",
+				expectedRepo:     "nginx",
+				expectedTag:      "latest",
+			}),
+			Entry("Docker Hub image without tag", parseTestCase{
+				imageRef:         "nginx",
+				expectedRegistry: "Docker Hub",
+				expectedRepo:     "nginx",
+				expectedTag:      "latest",
+			}),
+			Entry("Private registry with port", parseTestCase{
+				imageRef:         "registry.io:5000/myapp:v1.0",
+				expectedRegistry: "registry.io:5000",
+				expectedRepo:     "myapp",
+				expectedTag:      "v1.0",
+			}),
+			Entry("GCR image", parseTestCase{
+				imageRef:         "gcr.io/project/image:tag",
+				expectedRegistry: "gcr.io",
+				expectedRepo:     "project/image",
+				expectedTag:      "tag",
+			}),
+		)
+	})
+})

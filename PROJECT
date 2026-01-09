@@ -2,7 +2,7 @@
 # This file is used to track the info used to scaffold your project
 # and allow the plugins properly work.
 # More info: https://book.kubebuilder.io/reference/project-config.html
-domain: security.example.com
+domain: scans.aquasec.community
 layout:
 - go.kubebuilder.io/v4
 projectName: aqua-scan-triggerer
@@ -12,8 +12,8 @@ resources:
     crdVersion: v1
     namespaced: true
   controller: true
-  domain: security.example.com
-  group: security
+  domain: scans.aquasec.community
+  group: scans
   kind: ImageScan
   path: github.com/richardmsong/aqua-scan-triggerer/api/v1alpha1
   version: v1alpha1

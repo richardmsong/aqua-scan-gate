@@ -23,16 +23,16 @@ import (
 
 const (
 	// SchedulingGateName is the name of our scheduling gate
-	SchedulingGateName = "security.example.com/aqua-scan"
+	SchedulingGateName = "scans.aquasec.community/aqua-scan"
 
 	// AnnotationScanStatus stores comma-separated image scan statuses
-	AnnotationScanStatus = "security.example.com/scan-status"
+	AnnotationScanStatus = "scans.aquasec.community/scan-status"
 
 	// AnnotationBypassScan allows bypassing the scan gate
-	AnnotationBypassScan = "security.example.com/bypass-scan"
+	AnnotationBypassScan = "scans.aquasec.community/bypass-scan"
 
 	// LabelManagedBy identifies pods managed by this controller
-	LabelManagedBy = "security.example.com/managed-by"
+	LabelManagedBy = "scans.aquasec.community/managed-by"
 )
 
 // PodGateReconciler reconciles Pods with our scheduling gate
@@ -48,7 +48,7 @@ type PodGateReconciler struct {
 
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
-// +kubebuilder:rbac:groups=security.example.com,resources=imagescans,verbs=get;list;watch;create
+// +kubebuilder:rbac:groups=scans.aquasec.community,resources=imagescans,verbs=get;list;watch;create
 
 func (r *PodGateReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)

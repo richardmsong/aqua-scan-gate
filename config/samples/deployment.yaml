@@ -81,10 +81,10 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
-  - apiGroups: ["security.example.com"]
+  - apiGroups: ["scans.aquasec.community"]
     resources: ["imagescans"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["security.example.com"]
+  - apiGroups: ["scans.aquasec.community"]
     resources: ["imagescans/status"]
     verbs: ["get", "update", "patch"]
 ---

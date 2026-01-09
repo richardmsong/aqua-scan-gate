@@ -12,8 +12,8 @@ import (
 )
 
 const (
-	SchedulingGateName   = "security.example.com/aqua-scan"
-	AnnotationBypassScan = "security.example.com/bypass-scan"
+	SchedulingGateName   = "scans.aquasec.community/aqua-scan"
+	AnnotationBypassScan = "scans.aquasec.community/bypass-scan"
 )
 
 // PodMutator adds scheduling gate to pods
@@ -28,7 +28,7 @@ type PodMutator struct {
 	ExcludedImages []string
 }
 
-// +kubebuilder:webhook:path=/mutate-v1-pod,mutating=true,failurePolicy=fail,sideEffects=None,groups="",resources=pods,verbs=create,versions=v1,name=mpod.security.example.com,admissionReviewVersions=v1
+// +kubebuilder:webhook:path=/mutate-v1-pod,mutating=true,failurePolicy=fail,sideEffects=None,groups="",resources=pods,verbs=create,versions=v1,name=mpod.scans.aquasec.community,admissionReviewVersions=v1
 
 func (m *PodMutator) Handle(ctx context.Context, req admission.Request) admission.Response {
 	logger := log.FromContext(ctx)
@@ -73,7 +73,7 @@ func (m *PodMutator) Handle(ctx context.Context, req admission.Request) admissio
 	if pod.Labels == nil {
 		pod.Labels = make(map[string]string)
 	}
-	pod.Labels["security.example.com/gated"] = "true"
+	pod.Labels["scans.aquasec.community/gated"] = "true"
 
 	marshaledPod, err := json.Marshal(pod)
 	if err != nil {

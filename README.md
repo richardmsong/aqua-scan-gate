@@ -91,7 +91,7 @@ make run
 
 ### Pod Annotations
 
-- `security.example.com/bypass-scan: "true"`: Skip scanning for this pod (use with caution)
+- `scans.aquasec.community/bypass-scan: "true"`: Skip scanning for this pod (use with caution)
 
 ### Namespace Labels
 
@@ -105,7 +105,7 @@ The `ImageScan` CRD tracks the security scan status for container images.
 
 Example:
 ```yaml
-apiVersion: security.example.com/v1alpha1
+apiVersion: scans.aquasec.community/v1alpha1
 kind: ImageScan
 metadata:
   name: img-abc123
@@ -125,7 +125,7 @@ status:
 
 ## How It Works
 
-1. When a pod is created, the mutating webhook adds `security.example.com/aqua-scan` to its scheduling gates
+1. When a pod is created, the mutating webhook adds `scans.aquasec.community/aqua-scan` to its scheduling gates
 2. The pod remains in `SchedulingGated` status
 3. The Pod Gate Controller detects the gated pod and creates/checks ImageScan CRs for each container image
 4. The ImageScan Controller queries Aqua API for scan results, triggering scans if needed

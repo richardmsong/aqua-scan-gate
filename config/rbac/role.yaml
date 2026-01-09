@@ -22,7 +22,7 @@ rules:
   - update
   - watch
 - apiGroups:
-  - security.example.com
+  - scans.aquasec.community
   resources:
   - imagescans
   verbs:
@@ -34,13 +34,13 @@ rules:
   - update
   - watch
 - apiGroups:
-  - security.example.com
+  - scans.aquasec.community
   resources:
   - imagescans/finalizers
   verbs:
   - update
 - apiGroups:
-  - security.example.com
+  - scans.aquasec.community
   resources:
   - imagescans/status
   verbs:

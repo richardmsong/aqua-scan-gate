@@ -96,7 +96,7 @@ Monitors pods with scheduling gates:
 4. Emits Kubernetes events for observability
 
 **Special Handling**:
-- Supports bypass annotation: `security.example.com/bypass-scan: "true"`
+- Supports bypass annotation: `scans.aquasec.community/bypass-scan: "true"`
 - Respects excluded namespaces
 - Handles init containers, ephemeral containers
 
@@ -106,7 +106,7 @@ Monitors pods with scheduling gates:
 
 Admission controller that:
 1. Intercepts pod creation requests
-2. Injects `security.example.com/aqua-scan` scheduling gate
+2. Injects `scans.aquasec.community/aqua-scan` scheduling gate
 3. Skips excluded namespaces and images
 4. Honors bypass annotations
 

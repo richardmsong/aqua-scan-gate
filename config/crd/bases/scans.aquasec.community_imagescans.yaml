@@ -4,9 +4,9 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.16.5
-  name: imagescans.security.example.com
+  name: imagescans.scans.aquasec.community
 spec:
-  group: security.example.com
+  group: scans.aquasec.community
   names:
     kind: ImageScan
     listKind: ImageScanList

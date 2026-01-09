@@ -12,7 +12,7 @@ webhooks:
       namespace: system
       path: /mutate-v1-pod
   failurePolicy: Fail
-  name: mpod.security.example.com
+  name: mpod.scans.aquasec.community
   rules:
   - apiGroups:
     - ""

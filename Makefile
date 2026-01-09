@@ -1,3 +1,55 @@
+# Image URL to use all building/pushing image targets
+
+# ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
+ENVTEST_K8S_VERSION = 1.27.1
+
+# Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
+ifeq (,$(shell go env GOBIN))
+GOBIN=$(shell go env GOPATH)/bin
+else
+GOBIN=$(shell go env GOBIN)
+endif
+
+# CONTAINER_TOOL defines the container tool to be used for building images.
+# Be aware that the target commands are only tested with Docker which is
+# scaffolded by default. However, you might want to replace it to use other
+# tools. (i.e. podman)
+CONTAINER_TOOL ?= docker
+
+# Docker registry configuration
+REGISTRY ?= ghcr.io
+IMAGE_NAME ?= richardmsong/aqua-scan-triggerer
+IMG ?= $(REGISTRY)/$(IMAGE_NAME):latest
+
+# DOCKER_TAGS can be set to override default tags (space-separated for multiple tags)
+# Example: make docker-buildx-ci DOCKER_TAGS="latest v1.0.0 sha-abc1234"
+# Note: Each tag will be applied as $(REGISTRY)/$(IMAGE_NAME):$(tag)
+DOCKER_TAGS ?= latest
+
+# Helper to generate --tag flags for each tag in DOCKER_TAGS
+DOCKER_TAG_FLAGS = $(foreach tag,$(DOCKER_TAGS),--tag $(REGISTRY)/$(IMAGE_NAME):$(tag))
+
+# Setting SHELL to bash allows bash commands to be executed by recipes.
+# Options are set to exit when a recipe line exits non-zero or a piped command fails.
+SHELL = /usr/bin/env bash -o pipefail
+.SHELLFLAGS = -ec
+
+.PHONY: all
+all: build
+
+##@ General
+
+# The help target prints out all targets with their descriptions organized
+# beneath their categories. The categories are represented by '##@' and the
+# target descriptions by '##'. The awk commands is responsible for reading the
+# entire set of makefiles included in this invocation, looking for lines of the
+# file as xyz: ## something, and then pretty-format the target and help. Then,
+# if there's a line with ##@ something, that gets pretty-printed as a category.
+# More info on the usage of ANSI control characters for terminal formatting:
+# https://en.wikipedia.org/wiki/ANSI_escape_code#SGR_parameters
+# More info on the awk command:
+# http://linuxcommand.org/lc3_adv_awk.php
+
 .PHONY: help
 help: ## Display this help.
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} /^[a-zA-Z_0-9-]+:.*?##/ { printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
@@ -5,7 +57,7 @@ help: ## Display this help.
 ##@ Development
 
 .PHONY: manifests
-manifests: controller-gen ## Generate CustomResourceDefinition objects.
+manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
 
 .PHONY: generate
@@ -16,13 +68,25 @@ generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and
 fmt: ## Run go fmt against code.
 	go fmt ./...
 
+.PHONY: lint
+lint: ## Run go lint against code.
+	golangci-lint run
+
+.PHONY: fmt-check
+fmt-check: ## Check if code is formatted.
+	@if [ -n "$$(gofmt -s -l .)" ]; then \
+		echo "Go code is not formatted. Run 'make fmt' to fix."; \
+		gofmt -s -d .; \
+		exit 1; \
+	fi
+
 .PHONY: vet
 vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test
-test: manifests generate fmt vet ## Run tests.
-	go test ./... -coverprofile cover.out
+test: manifests generate fmt vet envtest ## Run tests.
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test ./... -coverprofile cover.out
 
 ##@ Build
 
@@ -34,60 +98,119 @@ build: manifests generate fmt vet ## Build manager binary.
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./cmd/main.go
 
+# If you wish built the manager image targeting other platforms you can use the --platform flag.
+# (i.e. docker build --platform linux/arm64 ). However, you must enable docker buildKit for it.
+# More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 .PHONY: docker-build
-docker-build: ## Build docker image.
-	docker build -t aqua-scan-gate:latest .
+docker-build: test docker-build-ci ## Build docker image with the manager.
+
+.PHONY: docker-build-ci
+docker-build-ci: ## Build docker image (for CI, without test dependency).
+	$(CONTAINER_TOOL) build -t ${IMG} .
 
 .PHONY: docker-push
-docker-push: ## Push docker image.
-	docker push aqua-scan-gate:latest
+docker-push: ## Push docker image with the manager.
+	$(CONTAINER_TOOL) push ${IMG}
+
+# PLATFORMS defines the target platforms for the manager image be build to provide support to multiple
+# architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
+# - able to use docker buildx . More info: https://docs.docker.com/build/buildx/
+# - have enable BuildKit, More info: https://docs.docker.com/develop/develop-images/build_enhancements/
+# - be able to push the image for your registry (i.e. if you do not inform a valid value via IMG=<myregistry/image:<tag>> then the export will fail)
+# To properly provided solutions that supports more than one platform you should use this option.
+PLATFORMS ?= linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
+
+.PHONY: docker-buildx
+docker-buildx: test docker-buildx-ci ## Build and push docker image for the manager for cross-platform support
+
+.PHONY: docker-setup
+docker-setup: ## Set up Docker Buildx builder for multi-arch builds.
+	- $(CONTAINER_TOOL) buildx create --name project-v3-builder --use 2>/dev/null || $(CONTAINER_TOOL) buildx use project-v3-builder
+
+.PHONY: docker-login
+docker-login: ## Log in to container registry. Requires REGISTRY_USER and REGISTRY_PASSWORD.
+	@if [ -z "$(REGISTRY_USER)" ] || [ -z "$(REGISTRY_PASSWORD)" ]; then \
+		echo "Error: REGISTRY_USER and REGISTRY_PASSWORD must be set"; \
+		exit 1; \
+	fi
+	@echo "$(REGISTRY_PASSWORD)" | $(CONTAINER_TOOL) login $(REGISTRY) -u $(REGISTRY_USER) --password-stdin
 
 .PHONY: docker-buildx-ci
-docker-buildx-ci: ## Build multi-platform docker image for CI using buildx.
-	@echo "Building image with tags: $(DOCKER_TAGS)"
-	docker buildx build \
-		$(if $(DOCKER_PUSH),--platform linux/amd64$(COMMA)linux/arm64 --push,--platform linux/amd64 --load) \
-		$(foreach tag,$(DOCKER_TAGS),-t $(REGISTRY)/$(IMAGE_NAME):$(tag)) \
-		-f $(if $(DOCKERFILE),$(DOCKERFILE),Dockerfile) \
-		.
+docker-buildx-ci: docker-setup ## Build and push multi-arch docker image (for CI, without test dependency).
+	sed -e '1 s/\(^FROM\)/FROM --platform=\$${BUILDPLATFORM}/; t' -e ' 1,// s//FROM --platform=\$${BUILDPLATFORM}/' Dockerfile > Dockerfile.cross
+	$(CONTAINER_TOOL) buildx build \
+		--platform=$(PLATFORMS) \
+		$(DOCKER_TAG_FLAGS) \
+		--push=$(if $(DOCKER_PUSH),true,false) \
+		--cache-from=type=registry,ref=$(REGISTRY)/$(IMAGE_NAME):buildcache \
+		--cache-to=type=registry,ref=$(REGISTRY)/$(IMAGE_NAME):buildcache,mode=max \
+		-f Dockerfile.cross .
+	rm -f Dockerfile.cross
 
-COMMA := ,
+.PHONY: docker-buildx-local
+docker-buildx-local: docker-setup ## Build multi-arch docker image locally (no push).
+	sed -e '1 s/\(^FROM\)/FROM --platform=\$${BUILDPLATFORM}/; t' -e ' 1,// s//FROM --platform=\$${BUILDPLATFORM}/' Dockerfile > Dockerfile.cross
+	$(CONTAINER_TOOL) buildx build \
+		--platform=$(PLATFORMS) \
+		$(DOCKER_TAG_FLAGS) \
+		-f Dockerfile.cross .
+	rm -f Dockerfile.cross
 
 ##@ Deployment
 
+ifndef ignore-not-found
+  ignore-not-found = false
+endif
+
 .PHONY: install
-install: manifests ## Install CRDs into the K8s cluster specified in ~/.kube/config.
-	kubectl apply -f config/crd/bases
+install: manifests kustomize ## Install CRDs into the K8s cluster specified in ~/.kube/config.
+	$(KUSTOMIZE) build config/crd | $(KUBECTL) apply -f -
 
 .PHONY: uninstall
-uninstall: manifests ## Uninstall CRDs from the K8s cluster specified in ~/.kube/config.
-	kubectl delete -f config/crd/bases
+uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
+	$(KUSTOMIZE) build config/crd | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
 
 .PHONY: deploy
-deploy: manifests ## Deploy controller to the K8s cluster specified in ~/.kube/config.
-	kubectl apply -f config/samples/deployment.yaml
+deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
+	$(KUSTOMIZE) build config/default | $(KUBECTL) apply -f -
 
 .PHONY: undeploy
-undeploy: ## Undeploy controller from the K8s cluster specified in ~/.kube/config.
-	kubectl delete -f config/samples/deployment.yaml
+undeploy: ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
+	$(KUSTOMIZE) build config/default | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
 
-##@ Dependencies
+##@ Build Dependencies
 
-CONTROLLER_GEN = $(shell pwd)/bin/controller-gen
+## Location to install dependencies to
+LOCALBIN ?= $(shell pwd)/bin
+$(LOCALBIN):
+	mkdir -p $(LOCALBIN)
+
+## Tool Binaries
+KUBECTL ?= kubectl
+KUSTOMIZE ?= $(LOCALBIN)/kustomize
+CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
+ENVTEST ?= $(LOCALBIN)/setup-envtest
+
+## Tool Versions
+KUSTOMIZE_VERSION ?= v5.0.1
+CONTROLLER_TOOLS_VERSION ?= v0.16.5
+
+.PHONY: kustomize
+kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary. If wrong version is installed, it will be removed before downloading.
+$(KUSTOMIZE): $(LOCALBIN)
+	@if test -x $(LOCALBIN)/kustomize && ! $(LOCALBIN)/kustomize version | grep -q $(KUSTOMIZE_VERSION); then \
+		echo "$(LOCALBIN)/kustomize version is not expected $(KUSTOMIZE_VERSION). Removing it before installing."; \
+		rm -rf $(LOCALBIN)/kustomize; \
+	fi
+	test -s $(LOCALBIN)/kustomize || GOBIN=$(LOCALBIN) GO111MODULE=on go install sigs.k8s.io/kustomize/kustomize/v5@$(KUSTOMIZE_VERSION)
+
 .PHONY: controller-gen
-controller-gen: ## Download controller-gen locally if necessary.
-	$(call go-install-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen@v0.16.5)
+controller-gen: $(CONTROLLER_GEN) ## Download controller-gen locally if necessary. If wrong version is installed, it will be overwritten.
+$(CONTROLLER_GEN): $(LOCALBIN)
+	test -s $(LOCALBIN)/controller-gen && $(LOCALBIN)/controller-gen --version | grep -q $(CONTROLLER_TOOLS_VERSION) || \
+	GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_TOOLS_VERSION)
 
-# go-install-tool will 'go install' any package $2 and install it to $1.
-PROJECT_DIR := $(shell dirname $(abspath $(lastword $(MAKEFILE_LIST))))
-define go-install-tool
-@[ -f $(1) ] || { \
-set -e ;\
-TMP_DIR=$$(mktemp -d) ;\
-cd $$TMP_DIR ;\
-go mod init tmp ;\
-echo "Downloading $(2)" ;\
-GOTOOLCHAIN=local GOBIN=$(PROJECT_DIR)/bin go install $(2) ;\
-rm -rf $$TMP_DIR ;\
-}
-endef
+.PHONY: envtest
+envtest: $(ENVTEST) ## Download envtest-setup locally if necessary.
+$(ENVTEST): $(LOCALBIN)
+	test -s $(LOCALBIN)/setup-envtest || GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest

@@ -59,14 +59,60 @@ func (r *ImageScanReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 	}
 
-	// Extract registry from image reference or use spec registry
-	registry := imageScan.Spec.Registry
-	if registry == "" {
-		registry = extractRegistry(imageScan.Spec.Image)
+	// Step 1: Pull the manifest and extract the config digest
+	logger.Info("Pulling manifest to extract config digest", "image", imageScan.Spec.Image)
+	configDigest, err := aqua.GetConfigDigest(ctx, imageScan.Spec.Image)
+	if err != nil {
+		logger.Error(err, "Failed to extract config digest from manifest")
+		imageScan.Status.Phase = securityv1alpha1.ScanPhaseError
+		imageScan.Status.Message = fmt.Sprintf("Failed to pull manifest: %v", err)
+		if updateErr := r.Status().Update(ctx, &imageScan); updateErr != nil {
+			logger.Error(updateErr, "Failed to update ImageScan status")
+		}
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
-	// Check current scan status in Aqua
-	result, err := r.AquaClient.GetScanResult(ctx, registry, imageScan.Spec.Image)
+	logger.Info("Config digest extracted", "image", imageScan.Spec.Image, "digest", configDigest)
+
+	// Step 2: Check if Aqua has a scan for this digest
+	imageIdentifier, err := r.AquaClient.GetImageByDigest(ctx, configDigest)
+	if err != nil {
+		logger.Error(err, "Failed to query Aqua by digest")
+		imageScan.Status.Phase = securityv1alpha1.ScanPhaseError
+		imageScan.Status.Message = err.Error()
+		if updateErr := r.Status().Update(ctx, &imageScan); updateErr != nil {
+			logger.Error(updateErr, "Failed to update ImageScan status")
+		}
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// Step 3: If no scan exists for this digest, trigger a new scan
+	if imageIdentifier == nil {
+		// Extract registry from image reference or use spec registry
+		registry := imageScan.Spec.Registry
+		if registry == "" {
+			registry = extractRegistry(imageScan.Spec.Image)
+		}
+
+		logger.Info("No existing scan found for digest, triggering new scan",
+			"image", imageScan.Spec.Image, "digest", configDigest)
+		err := r.AquaClient.TriggerScan(ctx, registry, imageScan.Spec.Image)
+		if err != nil {
+			logger.Error(err, "Failed to trigger scan")
+			imageScan.Status.Phase = securityv1alpha1.ScanPhaseError
+			imageScan.Status.Message = err.Error()
+		} else {
+			imageScan.Status.Phase = securityv1alpha1.ScanPhaseInProgress
+			imageScan.Status.Message = "Scan triggered"
+		}
+		if updateErr := r.Status().Update(ctx, &imageScan); updateErr != nil {
+			return ctrl.Result{}, updateErr
+		}
+		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+	}
+
+	// Step 4: Scan exists for this digest, retrieve the scan results
+	result, err := r.AquaClient.GetScanResult(ctx, imageIdentifier.Registry, imageIdentifier.Name)
 	if err != nil {
 		logger.Error(err, "Failed to get scan result from Aqua")
 		imageScan.Status.Phase = securityv1alpha1.ScanPhaseError
@@ -79,8 +125,13 @@ func (r *ImageScanReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	switch result.Status {
 	case aqua.StatusNotFound:
-		// Trigger a new scan
-		logger.Info("No existing scan found, triggering new scan", "image", imageScan.Spec.Image)
+		// This shouldn't happen since GetImageByDigest returned a result,
+		// but handle it gracefully by triggering a scan
+		registry := imageScan.Spec.Registry
+		if registry == "" {
+			registry = extractRegistry(imageScan.Spec.Image)
+		}
+		logger.Info("Unexpected: image found by digest but no scan result", "image", imageScan.Spec.Image)
 		err := r.AquaClient.TriggerScan(ctx, registry, imageScan.Spec.Image)
 		if err != nil {
 			logger.Error(err, "Failed to trigger scan")

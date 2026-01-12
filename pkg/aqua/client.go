@@ -53,6 +53,15 @@ type ScanResult struct {
 	ScanTime   time.Time
 }
 
+// ImageIdentifier represents an image identifier from Aqua API
+type ImageIdentifier struct {
+	Name       string `json:"name"`
+	Digest     string `json:"digest"`
+	Registry   string `json:"registry"`
+	Repository string `json:"repository"`
+	UID        string `json:"uid"`
+}
+
 // Client interface for Aqua operations
 type Client interface {
 	// GetScanResult retrieves existing scan results for an image
@@ -63,6 +72,9 @@ type Client interface {
 
 	// GetScanStatus checks the status of a specific scan
 	GetScanStatus(ctx context.Context, registry, image string) (*ScanResult, error)
+
+	// GetImageByDigest retrieves image identifiers by config digest
+	GetImageByDigest(ctx context.Context, digest string) (*ImageIdentifier, error)
 }
 
 // Config holds Aqua client configuration
@@ -486,4 +498,48 @@ func parseImageReference(imageRef string) (registry, repository, tag string, err
 	}
 
 	return registry, repository, tag, nil
+}
+
+// GetImageByDigest retrieves image identifiers by config digest
+// GET /images/details/{digest}
+func (c *aquaClient) GetImageByDigest(ctx context.Context, digest string) (*ImageIdentifier, error) {
+	if err := c.ensureAuthenticated(ctx); err != nil {
+		return nil, fmt.Errorf("authentication failed: %w", err)
+	}
+
+	// URL encode the digest
+	digestEncoded := url.PathEscape(digest)
+
+	// Build URL
+	apiURL := fmt.Sprintf("%s/api/v1/images/details/%s", c.getBaseURL(), digestEncoded)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("executing request: %w", err)
+	}
+	defer closeResponseBody(resp.Body)
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil // Image with this digest not found in Aqua
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("unexpected status code %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var result ImageIdentifier
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+
+	return &result, nil
 }

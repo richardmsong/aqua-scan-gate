@@ -90,6 +90,17 @@ func mockScanStatusFailed() string {
 	return `{"status": "Fail"}`
 }
 
+// mockImageIdentifierResponse returns a successful image identifier response
+func mockImageIdentifierResponse() string {
+	return `{
+		"name": "nginx:latest",
+		"digest": "sha256:abcdef1234567890",
+		"registry": "Docker Hub",
+		"repository": "library/nginx",
+		"uid": "12345-67890-abcdef"
+	}`
+}
+
 var _ = Describe("Aqua Client", func() {
 	Describe("Client Initialization", func() {
 		Context("when creating a new client", func() {
@@ -772,5 +783,142 @@ var _ = Describe("Aqua Client", func() {
 				expectedTag:      "tag",
 			}),
 		)
+	})
+
+	Describe("GetImageByDigest", func() {
+		Context("when querying by config digest", func() {
+			It("should return image identifier when digest exists", func() {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/v2/tokens" {
+						w.WriteHeader(http.StatusOK)
+						_, _ = w.Write([]byte(mockTokenResponse()))
+						return
+					}
+
+					if r.URL.Path == "/api/v1/images/details/sha256:abcdef1234567890" {
+						w.WriteHeader(http.StatusOK)
+						_, _ = w.Write([]byte(mockImageIdentifierResponse()))
+						return
+					}
+
+					w.WriteHeader(http.StatusNotFound)
+				}))
+				defer server.Close()
+
+				client := NewClient(Config{
+					BaseURL:   server.URL,
+					APIKey:    "test-key",
+					APISecret: "test-secret",
+				})
+
+				result, err := client.GetImageByDigest(context.Background(), "sha256:abcdef1234567890")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).NotTo(BeNil())
+				Expect(result.Name).To(Equal("nginx:latest"))
+				Expect(result.Digest).To(Equal("sha256:abcdef1234567890"))
+				Expect(result.Registry).To(Equal("Docker Hub"))
+				Expect(result.Repository).To(Equal("library/nginx"))
+			})
+
+			It("should return nil when digest not found", func() {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/v2/tokens" {
+						w.WriteHeader(http.StatusOK)
+						_, _ = w.Write([]byte(mockTokenResponse()))
+						return
+					}
+
+					w.WriteHeader(http.StatusNotFound)
+				}))
+				defer server.Close()
+
+				client := NewClient(Config{
+					BaseURL:   server.URL,
+					APIKey:    "test-key",
+					APISecret: "test-secret",
+				})
+
+				result, err := client.GetImageByDigest(context.Background(), "sha256:nonexistent")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeNil())
+			})
+
+			It("should handle digest with special characters", func() {
+				var requestPath string
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/v2/tokens" {
+						w.WriteHeader(http.StatusOK)
+						_, _ = w.Write([]byte(mockTokenResponse()))
+						return
+					}
+
+					// Capture the request path for verification
+					requestPath = r.URL.Path
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(mockImageIdentifierResponse()))
+				}))
+				defer server.Close()
+
+				client := NewClient(Config{
+					BaseURL:   server.URL,
+					APIKey:    "test-key",
+					APISecret: "test-secret",
+				})
+
+				_, err := client.GetImageByDigest(context.Background(), "sha256:abc123")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(requestPath).To(Equal("/api/v1/images/details/sha256:abc123"))
+			})
+
+			It("should handle API errors", func() {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/v2/tokens" {
+						w.WriteHeader(http.StatusOK)
+						_, _ = w.Write([]byte(mockTokenResponse()))
+						return
+					}
+
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = w.Write([]byte(`{"error": "Internal server error"}`))
+				}))
+				defer server.Close()
+
+				client := NewClient(Config{
+					BaseURL:   server.URL,
+					APIKey:    "test-key",
+					APISecret: "test-secret",
+				})
+
+				result, err := client.GetImageByDigest(context.Background(), "sha256:test")
+				Expect(err).To(HaveOccurred())
+				Expect(result).To(BeNil())
+				Expect(err.Error()).To(ContainSubstring("unexpected status code 500"))
+			})
+
+			It("should handle malformed JSON response", func() {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/v2/tokens" {
+						w.WriteHeader(http.StatusOK)
+						_, _ = w.Write([]byte(mockTokenResponse()))
+						return
+					}
+
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(`{invalid json`))
+				}))
+				defer server.Close()
+
+				client := NewClient(Config{
+					BaseURL:   server.URL,
+					APIKey:    "test-key",
+					APISecret: "test-secret",
+				})
+
+				result, err := client.GetImageByDigest(context.Background(), "sha256:test")
+				Expect(err).To(HaveOccurred())
+				Expect(result).To(BeNil())
+				Expect(err.Error()).To(ContainSubstring("decoding response"))
+			})
+		})
 	})
 })

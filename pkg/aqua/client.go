@@ -34,9 +34,6 @@ type Client interface {
 
 	// TriggerScan initiates a new scan for an image
 	TriggerScan(ctx context.Context, image, digest string) (string, error)
-
-	// GetScanStatus checks the status of a specific scan
-	GetScanStatus(ctx context.Context, scanID string) (*ScanResult, error)
 }
 
 // Config holds Aqua client configuration
@@ -216,29 +213,4 @@ func (c *aquaClient) TriggerScan(ctx context.Context, image, digest string) (str
 	}
 
 	return "", fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-}
-
-func (c *aquaClient) GetScanStatus(ctx context.Context, scanID string) (*ScanResult, error) {
-	// With v2 API, we use GetScanResult instead
-	// The scanID is in format: registry/image@sha256:...
-	// Parse it and call GetScanResult
-
-	// Find the @ to split image from digest
-	atIdx := strings.LastIndex(scanID, "@")
-	if atIdx == -1 {
-		return nil, fmt.Errorf("invalid scan ID format: %s", scanID)
-	}
-
-	imageRef := scanID[:atIdx]
-	digest := scanID[atIdx+1:]
-
-	// Find the first / to get past the registry
-	slashIdx := strings.Index(imageRef, "/")
-	if slashIdx == -1 {
-		return nil, fmt.Errorf("invalid scan ID format: %s", scanID)
-	}
-
-	image := imageRef[slashIdx+1:]
-
-	return c.GetScanResult(ctx, image, digest)
 }

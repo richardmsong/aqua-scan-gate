@@ -146,6 +146,11 @@ func (c *aquaClient) getBaseURL() string {
 
 // authenticate generates a new bearer token using HMAC signature
 func (c *aquaClient) authenticate(ctx context.Context) error {
+	// Validate API secret is configured
+	if c.config.APISecret == "" {
+		return fmt.Errorf("API secret is required for HMAC authentication")
+	}
+
 	timestamp := fmt.Sprintf("%d", time.Now().Unix())
 	method := "POST"
 	path := "/v2/tokens"

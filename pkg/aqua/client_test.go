@@ -35,13 +35,64 @@ func (m *mockAquaClient) GetRegistryName(ctx context.Context, hostname string) (
 }
 
 func (m *mockAquaClient) ConvertImageRef(ctx context.Context, imageRef string) (registryName string, imageName string, tag string, err error) {
-	// Use the actual implementation logic from aquaClient
-	client := &aquaClient{
-		registryCache:        m.registryCache,
-		registryCacheMu:      m.registryCacheMu,
-		registryCacheRefresh: m.registryCacheRefresh,
+	// Remove digest if present
+	originalRef := imageRef
+	if strings.Contains(imageRef, "@") {
+		parts := strings.Split(imageRef, "@")
+		imageRef = parts[0]
 	}
-	return client.ConvertImageRef(ctx, imageRef)
+
+	// Handle tag
+	tagIdx := strings.LastIndex(imageRef, ":")
+	hasPort := false
+
+	// Check if the colon is part of a port number (e.g., registry.io:5000)
+	if tagIdx > 0 {
+		beforeColon := imageRef[:tagIdx]
+		if strings.Contains(beforeColon, "/") {
+			// Colon is after a slash, so it's a tag
+			tag = imageRef[tagIdx+1:]
+			imageRef = imageRef[:tagIdx]
+		} else if strings.Contains(beforeColon, ".") {
+			// Colon is in the domain, so it's a port
+			hasPort = true
+			tag = "latest"
+		} else {
+			// Single name with colon, it's a tag
+			tag = imageRef[tagIdx+1:]
+			imageRef = imageRef[:tagIdx]
+		}
+	} else {
+		tag = "latest"
+	}
+
+	// Handle registry and repository
+	var hostname, repository string
+	slashIdx := strings.Index(imageRef, "/")
+	if slashIdx > 0 {
+		registryPart := imageRef[:slashIdx]
+		// Check if it looks like a registry (has . or :)
+		if strings.Contains(registryPart, ".") || (hasPort && strings.Contains(registryPart, ":")) {
+			hostname = registryPart
+			repository = imageRef[slashIdx+1:]
+		} else {
+			// It's a Docker Hub image with namespace (e.g., library/nginx)
+			hostname = "docker.io"
+			repository = imageRef
+		}
+	} else {
+		// No slash, it's a Docker Hub image
+		hostname = "docker.io"
+		repository = imageRef
+	}
+
+	// Get the Aqua registry name for this hostname
+	registryName, err = m.GetRegistryName(ctx, hostname)
+	if err != nil {
+		return "", "", "", fmt.Errorf("looking up registry name for %s: %w", originalRef, err)
+	}
+
+	return registryName, repository, tag, nil
 }
 
 func normalizeHostname(hostname string) string {

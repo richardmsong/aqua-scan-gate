@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"testing"
 	"time"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 )
 
 // mockAquaClient is a test implementation of the aquaClient for testing ConvertImageRef
@@ -48,356 +50,401 @@ func normalizeHostname(hostname string) string {
 	return hostname
 }
 
-func TestConvertImageRef(t *testing.T) {
-	tests := []struct {
-		name            string
-		imageRef        string
-		registryCache   map[string]string
-		wantRegistry    string
-		wantImage       string
-		wantTag         string
-		wantErr         bool
-		errContains     string
-	}{
-		{
-			name:     "Docker Hub image with namespace and tag",
-			imageRef: "docker.io/library/python:3.12.12",
-			registryCache: map[string]string{
-				"docker.io": "Docker Hub",
-			},
-			wantRegistry: "Docker Hub",
-			wantImage:    "library/python",
-			wantTag:      "3.12.12",
-			wantErr:      false,
-		},
-		{
-			name:     "Docker Hub image without explicit registry",
-			imageRef: "library/nginx:latest",
-			registryCache: map[string]string{
-				"docker.io": "Docker Hub",
-			},
-			wantRegistry: "Docker Hub",
-			wantImage:    "library/nginx",
-			wantTag:      "latest",
-			wantErr:      false,
-		},
-		{
-			name:     "Docker Hub single name image",
-			imageRef: "nginx",
-			registryCache: map[string]string{
-				"docker.io": "Docker Hub",
-			},
-			wantRegistry: "Docker Hub",
-			wantImage:    "nginx",
-			wantTag:      "latest",
-			wantErr:      false,
-		},
-		{
-			name:     "Docker Hub image with tag",
-			imageRef: "nginx:1.21.0",
-			registryCache: map[string]string{
-				"docker.io": "Docker Hub",
-			},
-			wantRegistry: "Docker Hub",
-			wantImage:    "nginx",
-			wantTag:      "1.21.0",
-			wantErr:      false,
-		},
-		{
-			name:     "GCR image with tag",
-			imageRef: "gcr.io/project/image:v1.0.0",
-			registryCache: map[string]string{
-				"gcr.io": "GCR",
-			},
-			wantRegistry: "GCR",
-			wantImage:    "project/image",
-			wantTag:      "v1.0.0",
-			wantErr:      false,
-		},
-		{
-			name:     "Custom registry with port",
-			imageRef: "registry.io:5000/team/project/image:tag",
-			registryCache: map[string]string{
-				"registry.io:5000": "Custom Registry",
-			},
-			wantRegistry: "Custom Registry",
-			wantImage:    "team/project/image",
-			wantTag:      "tag",
-			wantErr:      false,
-		},
-		{
-			name:     "Custom registry with port and no tag",
-			imageRef: "registry.io:5000/image",
-			registryCache: map[string]string{
-				"registry.io:5000": "Custom Registry",
-			},
-			wantRegistry: "Custom Registry",
-			wantImage:    "image",
-			wantTag:      "latest",
-			wantErr:      false,
-		},
-		{
-			name:     "Image with digest",
-			imageRef: "docker.io/library/alpine@sha256:abcd1234",
-			registryCache: map[string]string{
-				"docker.io": "Docker Hub",
-			},
-			wantRegistry: "Docker Hub",
-			wantImage:    "library/alpine",
-			wantTag:      "latest",
-			wantErr:      false,
-		},
-		{
-			name:     "Image with tag and digest",
-			imageRef: "gcr.io/project/image:v1.0@sha256:abcd1234",
-			registryCache: map[string]string{
-				"gcr.io": "GCR",
-			},
-			wantRegistry: "GCR",
-			wantImage:    "project/image",
-			wantTag:      "v1.0",
-			wantErr:      false,
-		},
-		{
-			name:     "Multi-level namespace",
-			imageRef: "registry.io/team/project/subproject/image:tag",
-			registryCache: map[string]string{
-				"registry.io": "Custom Registry",
-			},
-			wantRegistry: "Custom Registry",
-			wantImage:    "team/project/subproject/image",
-			wantTag:      "tag",
-			wantErr:      false,
-		},
-		{
-			name:     "Image with complex tag",
-			imageRef: "docker.io/library/app:v1.2.3-alpha.1",
-			registryCache: map[string]string{
-				"docker.io": "Docker Hub",
-			},
-			wantRegistry: "Docker Hub",
-			wantImage:    "library/app",
-			wantTag:      "v1.2.3-alpha.1",
-			wantErr:      false,
-		},
-		{
-			name:     "ECR-style registry",
-			imageRef: "123456789012.dkr.ecr.us-east-1.amazonaws.com/myapp:latest",
-			registryCache: map[string]string{
-				"123456789012.dkr.ecr.us-east-1.amazonaws.com": "AWS ECR",
-			},
-			wantRegistry: "AWS ECR",
-			wantImage:    "myapp",
-			wantTag:      "latest",
-			wantErr:      false,
-		},
-		{
-			name:     "Azure Container Registry",
-			imageRef: "myregistry.azurecr.io/samples/nginx:latest",
-			registryCache: map[string]string{
-				"myregistry.azurecr.io": "Azure ACR",
-			},
-			wantRegistry: "Azure ACR",
-			wantImage:    "samples/nginx",
-			wantTag:      "latest",
-			wantErr:      false,
-		},
-		{
-			name:     "Image with no tag defaults to latest",
-			imageRef: "gcr.io/project/image",
-			registryCache: map[string]string{
-				"gcr.io": "GCR",
-			},
-			wantRegistry: "GCR",
-			wantImage:    "project/image",
-			wantTag:      "latest",
-			wantErr:      false,
-		},
-		{
-			name:     "Docker Hub official image shorthand",
-			imageRef: "ubuntu",
-			registryCache: map[string]string{
-				"docker.io": "Docker Hub",
-			},
-			wantRegistry: "Docker Hub",
-			wantImage:    "ubuntu",
-			wantTag:      "latest",
-			wantErr:      false,
-		},
-		{
-			name:     "Quay.io image",
-			imageRef: "quay.io/prometheus/prometheus:v2.30.0",
-			registryCache: map[string]string{
-				"quay.io": "Quay",
-			},
-			wantRegistry: "Quay",
-			wantImage:    "prometheus/prometheus",
-			wantTag:      "v2.30.0",
-			wantErr:      false,
-		},
-		{
-			name:     "Image with underscores and hyphens",
-			imageRef: "docker.io/my_org/my-app_v2:1.0.0-rc1",
-			registryCache: map[string]string{
-				"docker.io": "Docker Hub",
-			},
-			wantRegistry: "Docker Hub",
-			wantImage:    "my_org/my-app_v2",
-			wantTag:      "1.0.0-rc1",
-			wantErr:      false,
-		},
-		{
-			name:     "Registry with subdomain",
-			imageRef: "eu.gcr.io/project-id/image:tag",
-			registryCache: map[string]string{
-				"eu.gcr.io": "GCR EU",
-			},
-			wantRegistry: "GCR EU",
-			wantImage:    "project-id/image",
-			wantTag:      "tag",
-			wantErr:      false,
-		},
-		{
-			name:     "Image with SHA-like tag",
-			imageRef: "docker.io/library/app:sha-abcd1234",
-			registryCache: map[string]string{
-				"docker.io": "Docker Hub",
-			},
-			wantRegistry: "Docker Hub",
-			wantImage:    "library/app",
-			wantTag:      "sha-abcd1234",
-			wantErr:      false,
-		},
-		{
-			name:     "Registry with hyphen in name",
-			imageRef: "my-registry.io/app:v1",
-			registryCache: map[string]string{
-				"my-registry.io": "My Registry",
-			},
-			wantRegistry: "My Registry",
-			wantImage:    "app",
-			wantTag:      "v1",
-			wantErr:      false,
-		},
-	}
+var _ = Describe("ConvertImageRef", func() {
+	var (
+		ctx context.Context
+	)
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	BeforeEach(func() {
+		ctx = context.Background()
+	})
+
+	Describe("Docker Hub images", func() {
+		It("should parse image with namespace and tag", func() {
 			client := &aquaClient{
-				registryCache:        tt.registryCache,
+				registryCache: map[string]string{
+					"docker.io": "Docker Hub",
+				},
 				registryCacheMu:      sync.RWMutex{},
 				registryCacheRefresh: time.Now(),
 			}
 
-			ctx := context.Background()
-			gotRegistry, gotImage, gotTag, err := client.ConvertImageRef(ctx, tt.imageRef)
-
-			if (err != nil) != tt.wantErr {
-				t.Errorf("ConvertImageRef() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-
-			if tt.wantErr {
-				if err != nil && tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
-					t.Errorf("ConvertImageRef() error = %v, should contain %q", err, tt.errContains)
-				}
-				return
-			}
-
-			if gotRegistry != tt.wantRegistry {
-				t.Errorf("ConvertImageRef() gotRegistry = %v, want %v", gotRegistry, tt.wantRegistry)
-			}
-			if gotImage != tt.wantImage {
-				t.Errorf("ConvertImageRef() gotImage = %v, want %v", gotImage, tt.wantImage)
-			}
-			if gotTag != tt.wantTag {
-				t.Errorf("ConvertImageRef() gotTag = %v, want %v", gotTag, tt.wantTag)
-			}
+			registry, image, tag, err := client.ConvertImageRef(ctx, "docker.io/library/python:3.12.12")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registry).To(Equal("Docker Hub"))
+			Expect(image).To(Equal("library/python"))
+			Expect(tag).To(Equal("3.12.12"))
 		})
-	}
-}
 
-// TestConvertImageRef_EdgeCases tests additional edge cases and boundary conditions
-func TestConvertImageRef_EdgeCases(t *testing.T) {
-	tests := []struct {
-		name          string
-		imageRef      string
-		registryCache map[string]string
-		wantRegistry  string
-		wantImage     string
-		wantTag       string
-		wantErr       bool
-	}{
-		{
-			name:     "Empty registry cache",
-			imageRef: "nginx:latest",
-			registryCache: map[string]string{},
-			wantErr:  true,
-		},
-		{
-			name:     "Image path with many slashes",
-			imageRef: "gcr.io/a/b/c/d/e/image:tag",
-			registryCache: map[string]string{
-				"gcr.io": "GCR",
-			},
-			wantRegistry: "GCR",
-			wantImage:    "a/b/c/d/e/image",
-			wantTag:      "tag",
-			wantErr:      false,
-		},
-		{
-			name:     "Numeric tag",
-			imageRef: "docker.io/app:12345",
-			registryCache: map[string]string{
-				"docker.io": "Docker Hub",
-			},
-			wantRegistry: "Docker Hub",
-			wantImage:    "app",
-			wantTag:      "12345",
-			wantErr:      false,
-		},
-		{
-			name:     "Tag with special characters",
-			imageRef: "docker.io/app:v1.0_beta-rc.1+build.123",
-			registryCache: map[string]string{
-				"docker.io": "Docker Hub",
-			},
-			wantRegistry: "Docker Hub",
-			wantImage:    "app",
-			wantTag:      "v1.0_beta-rc.1+build.123",
-			wantErr:      false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+		It("should parse image without explicit registry", func() {
 			client := &aquaClient{
-				registryCache:        tt.registryCache,
+				registryCache: map[string]string{
+					"docker.io": "Docker Hub",
+				},
 				registryCacheMu:      sync.RWMutex{},
 				registryCacheRefresh: time.Now(),
 			}
 
-			ctx := context.Background()
-			gotRegistry, gotImage, gotTag, err := client.ConvertImageRef(ctx, tt.imageRef)
-
-			if (err != nil) != tt.wantErr {
-				t.Errorf("ConvertImageRef() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-
-			if tt.wantErr {
-				return
-			}
-
-			if gotRegistry != tt.wantRegistry {
-				t.Errorf("ConvertImageRef() gotRegistry = %v, want %v", gotRegistry, tt.wantRegistry)
-			}
-			if gotImage != tt.wantImage {
-				t.Errorf("ConvertImageRef() gotImage = %v, want %v", gotImage, tt.wantImage)
-			}
-			if gotTag != tt.wantTag {
-				t.Errorf("ConvertImageRef() gotTag = %v, want %v", gotTag, tt.wantTag)
-			}
+			registry, image, tag, err := client.ConvertImageRef(ctx, "library/nginx:latest")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registry).To(Equal("Docker Hub"))
+			Expect(image).To(Equal("library/nginx"))
+			Expect(tag).To(Equal("latest"))
 		})
-	}
-}
+
+		It("should parse single name image", func() {
+			client := &aquaClient{
+				registryCache: map[string]string{
+					"docker.io": "Docker Hub",
+				},
+				registryCacheMu:      sync.RWMutex{},
+				registryCacheRefresh: time.Now(),
+			}
+
+			registry, image, tag, err := client.ConvertImageRef(ctx, "nginx")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registry).To(Equal("Docker Hub"))
+			Expect(image).To(Equal("nginx"))
+			Expect(tag).To(Equal("latest"))
+		})
+
+		It("should parse image with tag", func() {
+			client := &aquaClient{
+				registryCache: map[string]string{
+					"docker.io": "Docker Hub",
+				},
+				registryCacheMu:      sync.RWMutex{},
+				registryCacheRefresh: time.Now(),
+			}
+
+			registry, image, tag, err := client.ConvertImageRef(ctx, "nginx:1.21.0")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registry).To(Equal("Docker Hub"))
+			Expect(image).To(Equal("nginx"))
+			Expect(tag).To(Equal("1.21.0"))
+		})
+
+		It("should parse official image shorthand", func() {
+			client := &aquaClient{
+				registryCache: map[string]string{
+					"docker.io": "Docker Hub",
+				},
+				registryCacheMu:      sync.RWMutex{},
+				registryCacheRefresh: time.Now(),
+			}
+
+			registry, image, tag, err := client.ConvertImageRef(ctx, "ubuntu")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registry).To(Equal("Docker Hub"))
+			Expect(image).To(Equal("ubuntu"))
+			Expect(tag).To(Equal("latest"))
+		})
+	})
+
+	Describe("Cloud provider registries", func() {
+		It("should parse GCR image with tag", func() {
+			client := &aquaClient{
+				registryCache: map[string]string{
+					"gcr.io": "GCR",
+				},
+				registryCacheMu:      sync.RWMutex{},
+				registryCacheRefresh: time.Now(),
+			}
+
+			registry, image, tag, err := client.ConvertImageRef(ctx, "gcr.io/project/image:v1.0.0")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registry).To(Equal("GCR"))
+			Expect(image).To(Equal("project/image"))
+			Expect(tag).To(Equal("v1.0.0"))
+		})
+
+		It("should parse ECR-style registry", func() {
+			client := &aquaClient{
+				registryCache: map[string]string{
+					"123456789012.dkr.ecr.us-east-1.amazonaws.com": "AWS ECR",
+				},
+				registryCacheMu:      sync.RWMutex{},
+				registryCacheRefresh: time.Now(),
+			}
+
+			registry, image, tag, err := client.ConvertImageRef(ctx, "123456789012.dkr.ecr.us-east-1.amazonaws.com/myapp:latest")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registry).To(Equal("AWS ECR"))
+			Expect(image).To(Equal("myapp"))
+			Expect(tag).To(Equal("latest"))
+		})
+
+		It("should parse Azure Container Registry", func() {
+			client := &aquaClient{
+				registryCache: map[string]string{
+					"myregistry.azurecr.io": "Azure ACR",
+				},
+				registryCacheMu:      sync.RWMutex{},
+				registryCacheRefresh: time.Now(),
+			}
+
+			registry, image, tag, err := client.ConvertImageRef(ctx, "myregistry.azurecr.io/samples/nginx:latest")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registry).To(Equal("Azure ACR"))
+			Expect(image).To(Equal("samples/nginx"))
+			Expect(tag).To(Equal("latest"))
+		})
+
+		It("should parse Quay.io image", func() {
+			client := &aquaClient{
+				registryCache: map[string]string{
+					"quay.io": "Quay",
+				},
+				registryCacheMu:      sync.RWMutex{},
+				registryCacheRefresh: time.Now(),
+			}
+
+			registry, image, tag, err := client.ConvertImageRef(ctx, "quay.io/prometheus/prometheus:v2.30.0")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registry).To(Equal("Quay"))
+			Expect(image).To(Equal("prometheus/prometheus"))
+			Expect(tag).To(Equal("v2.30.0"))
+		})
+	})
+
+	Describe("Custom registries", func() {
+		It("should parse registry with port", func() {
+			client := &aquaClient{
+				registryCache: map[string]string{
+					"registry.io:5000": "Custom Registry",
+				},
+				registryCacheMu:      sync.RWMutex{},
+				registryCacheRefresh: time.Now(),
+			}
+
+			registry, image, tag, err := client.ConvertImageRef(ctx, "registry.io:5000/team/project/image:tag")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registry).To(Equal("Custom Registry"))
+			Expect(image).To(Equal("team/project/image"))
+			Expect(tag).To(Equal("tag"))
+		})
+
+		It("should parse registry with port and no tag", func() {
+			client := &aquaClient{
+				registryCache: map[string]string{
+					"registry.io:5000": "Custom Registry",
+				},
+				registryCacheMu:      sync.RWMutex{},
+				registryCacheRefresh: time.Now(),
+			}
+
+			registry, image, tag, err := client.ConvertImageRef(ctx, "registry.io:5000/image")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registry).To(Equal("Custom Registry"))
+			Expect(image).To(Equal("image"))
+			Expect(tag).To(Equal("latest"))
+		})
+
+		It("should parse registry with subdomain", func() {
+			client := &aquaClient{
+				registryCache: map[string]string{
+					"eu.gcr.io": "GCR EU",
+				},
+				registryCacheMu:      sync.RWMutex{},
+				registryCacheRefresh: time.Now(),
+			}
+
+			registry, image, tag, err := client.ConvertImageRef(ctx, "eu.gcr.io/project-id/image:tag")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registry).To(Equal("GCR EU"))
+			Expect(image).To(Equal("project-id/image"))
+			Expect(tag).To(Equal("tag"))
+		})
+
+		It("should parse registry with hyphen in name", func() {
+			client := &aquaClient{
+				registryCache: map[string]string{
+					"my-registry.io": "My Registry",
+				},
+				registryCacheMu:      sync.RWMutex{},
+				registryCacheRefresh: time.Now(),
+			}
+
+			registry, image, tag, err := client.ConvertImageRef(ctx, "my-registry.io/app:v1")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registry).To(Equal("My Registry"))
+			Expect(image).To(Equal("app"))
+			Expect(tag).To(Equal("v1"))
+		})
+	})
+
+	Describe("Image formats", func() {
+		It("should parse image with digest", func() {
+			client := &aquaClient{
+				registryCache: map[string]string{
+					"docker.io": "Docker Hub",
+				},
+				registryCacheMu:      sync.RWMutex{},
+				registryCacheRefresh: time.Now(),
+			}
+
+			registry, image, tag, err := client.ConvertImageRef(ctx, "docker.io/library/alpine@sha256:abcd1234")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registry).To(Equal("Docker Hub"))
+			Expect(image).To(Equal("library/alpine"))
+			Expect(tag).To(Equal("latest"))
+		})
+
+		It("should parse image with tag and digest", func() {
+			client := &aquaClient{
+				registryCache: map[string]string{
+					"gcr.io": "GCR",
+				},
+				registryCacheMu:      sync.RWMutex{},
+				registryCacheRefresh: time.Now(),
+			}
+
+			registry, image, tag, err := client.ConvertImageRef(ctx, "gcr.io/project/image:v1.0@sha256:abcd1234")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registry).To(Equal("GCR"))
+			Expect(image).To(Equal("project/image"))
+			Expect(tag).To(Equal("v1.0"))
+		})
+
+		It("should parse multi-level namespace", func() {
+			client := &aquaClient{
+				registryCache: map[string]string{
+					"registry.io": "Custom Registry",
+				},
+				registryCacheMu:      sync.RWMutex{},
+				registryCacheRefresh: time.Now(),
+			}
+
+			registry, image, tag, err := client.ConvertImageRef(ctx, "registry.io/team/project/subproject/image:tag")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registry).To(Equal("Custom Registry"))
+			Expect(image).To(Equal("team/project/subproject/image"))
+			Expect(tag).To(Equal("tag"))
+		})
+
+		It("should parse image with complex tag", func() {
+			client := &aquaClient{
+				registryCache: map[string]string{
+					"docker.io": "Docker Hub",
+				},
+				registryCacheMu:      sync.RWMutex{},
+				registryCacheRefresh: time.Now(),
+			}
+
+			registry, image, tag, err := client.ConvertImageRef(ctx, "docker.io/library/app:v1.2.3-alpha.1")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registry).To(Equal("Docker Hub"))
+			Expect(image).To(Equal("library/app"))
+			Expect(tag).To(Equal("v1.2.3-alpha.1"))
+		})
+
+		It("should default to latest when no tag specified", func() {
+			client := &aquaClient{
+				registryCache: map[string]string{
+					"gcr.io": "GCR",
+				},
+				registryCacheMu:      sync.RWMutex{},
+				registryCacheRefresh: time.Now(),
+			}
+
+			registry, image, tag, err := client.ConvertImageRef(ctx, "gcr.io/project/image")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registry).To(Equal("GCR"))
+			Expect(image).To(Equal("project/image"))
+			Expect(tag).To(Equal("latest"))
+		})
+
+		It("should parse image with underscores and hyphens", func() {
+			client := &aquaClient{
+				registryCache: map[string]string{
+					"docker.io": "Docker Hub",
+				},
+				registryCacheMu:      sync.RWMutex{},
+				registryCacheRefresh: time.Now(),
+			}
+
+			registry, image, tag, err := client.ConvertImageRef(ctx, "docker.io/my_org/my-app_v2:1.0.0-rc1")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registry).To(Equal("Docker Hub"))
+			Expect(image).To(Equal("my_org/my-app_v2"))
+			Expect(tag).To(Equal("1.0.0-rc1"))
+		})
+
+		It("should parse image with SHA-like tag", func() {
+			client := &aquaClient{
+				registryCache: map[string]string{
+					"docker.io": "Docker Hub",
+				},
+				registryCacheMu:      sync.RWMutex{},
+				registryCacheRefresh: time.Now(),
+			}
+
+			registry, image, tag, err := client.ConvertImageRef(ctx, "docker.io/library/app:sha-abcd1234")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registry).To(Equal("Docker Hub"))
+			Expect(image).To(Equal("library/app"))
+			Expect(tag).To(Equal("sha-abcd1234"))
+		})
+	})
+
+	Describe("Edge cases", func() {
+		It("should fail with empty registry cache", func() {
+			client := &aquaClient{
+				registryCache:        map[string]string{},
+				registryCacheMu:      sync.RWMutex{},
+				registryCacheRefresh: time.Now(),
+			}
+
+			_, _, _, err := client.ConvertImageRef(ctx, "nginx:latest")
+			Expect(err).To(HaveOccurred())
+		})
+
+		It("should parse image path with many slashes", func() {
+			client := &aquaClient{
+				registryCache: map[string]string{
+					"gcr.io": "GCR",
+				},
+				registryCacheMu:      sync.RWMutex{},
+				registryCacheRefresh: time.Now(),
+			}
+
+			registry, image, tag, err := client.ConvertImageRef(ctx, "gcr.io/a/b/c/d/e/image:tag")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registry).To(Equal("GCR"))
+			Expect(image).To(Equal("a/b/c/d/e/image"))
+			Expect(tag).To(Equal("tag"))
+		})
+
+		It("should parse numeric tag", func() {
+			client := &aquaClient{
+				registryCache: map[string]string{
+					"docker.io": "Docker Hub",
+				},
+				registryCacheMu:      sync.RWMutex{},
+				registryCacheRefresh: time.Now(),
+			}
+
+			registry, image, tag, err := client.ConvertImageRef(ctx, "docker.io/app:12345")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registry).To(Equal("Docker Hub"))
+			Expect(image).To(Equal("app"))
+			Expect(tag).To(Equal("12345"))
+		})
+
+		It("should parse tag with special characters", func() {
+			client := &aquaClient{
+				registryCache: map[string]string{
+					"docker.io": "Docker Hub",
+				},
+				registryCacheMu:      sync.RWMutex{},
+				registryCacheRefresh: time.Now(),
+			}
+
+			registry, image, tag, err := client.ConvertImageRef(ctx, "docker.io/app:v1.0_beta-rc.1+build.123")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registry).To(Equal("Docker Hub"))
+			Expect(image).To(Equal("app"))
+			Expect(tag).To(Equal("v1.0_beta-rc.1+build.123"))
+		})
+	})
+})

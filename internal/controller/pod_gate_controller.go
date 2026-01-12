@@ -138,7 +138,7 @@ func (r *PodGateReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 		// Check scan status
 		switch imageScan.Status.Phase {
-		case securityv1alpha1.ScanPhasePassed:
+		case securityv1alpha1.ScanPhaseRegistered:
 			// Good, continue checking other images
 			continue
 		case securityv1alpha1.ScanPhaseFailed:

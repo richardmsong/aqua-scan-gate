@@ -14,7 +14,7 @@ import (
 	securityv1alpha1 "github.com/richardmsong/aqua-scan-triggerer/api/v1alpha1"
 )
 
-func TestPodGateReconciler_RemovesGateWhenAllScansPassed(t *testing.T) {
+func TestPodGateReconciler_RemovesGateWhenAllImagesRegistered(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)
 	_ = securityv1alpha1.AddToScheme(scheme)
@@ -35,7 +35,7 @@ func TestPodGateReconciler_RemovesGateWhenAllScansPassed(t *testing.T) {
 		},
 	}
 
-	// Create a passed ImageScan
+	// Create a registered ImageScan
 	imageScan := &securityv1alpha1.ImageScan{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      imageScanName(imageRef{image: "nginx:latest"}),
@@ -45,7 +45,7 @@ func TestPodGateReconciler_RemovesGateWhenAllScansPassed(t *testing.T) {
 			Image: "nginx:latest",
 		},
 		Status: securityv1alpha1.ImageScanStatus{
-			Phase: securityv1alpha1.ScanPhasePassed,
+			Phase: securityv1alpha1.ScanPhaseRegistered,
 		},
 	}
 

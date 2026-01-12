@@ -21,13 +21,13 @@ type ImageScanSpec struct {
 }
 
 // ScanPhase represents the current phase of the scan
-// +kubebuilder:validation:Enum=Pending;InProgress;Passed;Failed;Error
+// +kubebuilder:validation:Enum=Pending;InProgress;Registered;Failed;Error
 type ScanPhase string
 
 const (
 	ScanPhasePending    ScanPhase = "Pending"
 	ScanPhaseInProgress ScanPhase = "InProgress"
-	ScanPhasePassed     ScanPhase = "Passed"
+	ScanPhaseRegistered ScanPhase = "Registered"
 	ScanPhaseFailed     ScanPhase = "Failed"
 	ScanPhaseError      ScanPhase = "Error"
 )

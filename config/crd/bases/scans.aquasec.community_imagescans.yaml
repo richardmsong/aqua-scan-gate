@@ -150,7 +150,7 @@ spec:
                 enum:
                 - Pending
                 - InProgress
-                - Passed
+                - Registered
                 - Failed
                 - Error
                 type: string

@@ -35,7 +35,7 @@ func (r *ImageScanReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	// If already in terminal state, check if rescan is needed
-	if imageScan.Status.Phase == securityv1alpha1.ScanPhasePassed ||
+	if imageScan.Status.Phase == securityv1alpha1.ScanPhaseRegistered ||
 		imageScan.Status.Phase == securityv1alpha1.ScanPhaseFailed {
 
 		// Optionally rescan after interval
@@ -92,15 +92,15 @@ func (r *ImageScanReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 
 	case aqua.StatusFound:
-		// Image found in Aqua (not 404) - consider it passed
+		// Image found in Aqua (not 404) - it's registered
 		// Aqua Enforcer will handle actual enforcement
 		now := metav1.Now()
 		imageScan.Status.LastScanTime = &now
 		imageScan.Status.CompletedTime = &now
-		imageScan.Status.Phase = securityv1alpha1.ScanPhasePassed
-		imageScan.Status.Message = "Image found in Aqua registry"
+		imageScan.Status.Phase = securityv1alpha1.ScanPhaseRegistered
+		imageScan.Status.Message = "Image registered in Aqua"
 
-		logger.Info("Image found in Aqua, scan passed",
+		logger.Info("Image registered in Aqua",
 			"image", imageScan.Spec.Image,
 			"digest", imageScan.Spec.Digest)
 

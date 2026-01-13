@@ -49,8 +49,8 @@ var _ = Describe("HMAC256 Signing", func() {
 			req, _ := http.NewRequest("GET", "https://api.aquasec.com/test", nil)
 			err := tm.SignRequest(req, nil)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(req.Header.Get("X-Aqua-Timestamp")).To(BeEmpty())
-			Expect(req.Header.Get("X-Aqua-Signature")).To(BeEmpty())
+			Expect(req.Header.Get("X-Timestamp")).To(BeEmpty())
+			Expect(req.Header.Get("X-Signature")).To(BeEmpty())
 		})
 
 		It("should add signature headers when HMAC secret is set", func() {
@@ -62,8 +62,8 @@ var _ = Describe("HMAC256 Signing", func() {
 			req, _ := http.NewRequest("GET", "https://api.aquasec.com/test", nil)
 			err := tm.SignRequest(req, nil)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(req.Header.Get("X-Aqua-Timestamp")).NotTo(BeEmpty())
-			Expect(req.Header.Get("X-Aqua-Signature")).NotTo(BeEmpty())
+			Expect(req.Header.Get("X-Timestamp")).NotTo(BeEmpty())
+			Expect(req.Header.Get("X-Signature")).NotTo(BeEmpty())
 		})
 
 		It("should generate consistent signatures for same input", func() {
@@ -99,8 +99,8 @@ var _ = Describe("HMAC256 Signing", func() {
 
 			// Different bodies should produce different signatures
 			// (though timestamps might also differ, making them different anyway)
-			sig1 := req1.Header.Get("X-Aqua-Signature")
-			sig2 := req2.Header.Get("X-Aqua-Signature")
+			sig1 := req1.Header.Get("X-Signature")
+			sig2 := req2.Header.Get("X-Signature")
 			Expect(sig1).NotTo(BeEmpty())
 			Expect(sig2).NotTo(BeEmpty())
 		})

@@ -193,11 +193,6 @@ func (c *aquaClient) GetScanResult(ctx context.Context, image, digest string) (*
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
 
-	// Add HMAC signature if configured
-	if err := c.tokenManager.SignRequest(req, nil); err != nil {
-		return nil, fmt.Errorf("signing request: %w", err)
-	}
-
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("executing request: %w", err)
@@ -282,11 +277,6 @@ func (c *aquaClient) TriggerScan(ctx context.Context, image, digest string) (str
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
-	// Add HMAC signature if configured
-	if err := c.tokenManager.SignRequest(req, bodyBytes); err != nil {
-		return "", fmt.Errorf("signing request: %w", err)
-	}
-
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("executing request: %w", err)
@@ -338,11 +328,6 @@ func (c *aquaClient) fetchRegistries(ctx context.Context) ([]Registry, error) {
 	token := c.tokenManager.GetToken()
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
-
-	// Add HMAC signature if configured
-	if err := c.tokenManager.SignRequest(req, nil); err != nil {
-		return nil, fmt.Errorf("signing request: %w", err)
-	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

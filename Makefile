@@ -94,6 +94,13 @@ test: manifests generate fmt vet envtest ## Run tests.
 build: manifests generate fmt vet ## Build manager binary.
 	go build -o bin/manager cmd/main.go
 
+.PHONY: build-trigger
+build-trigger: fmt vet ## Build aqua-trigger CLI binary.
+	go build -o bin/aqua-trigger cmd/trigger/main.go
+
+.PHONY: build-all
+build-all: build build-trigger ## Build all binaries (manager and CLI).
+
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./cmd/main.go

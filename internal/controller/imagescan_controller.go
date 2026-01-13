@@ -34,11 +34,13 @@ func (r *ImageScanReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// If already in terminal state, check if rescan is needed
-	if imageScan.Status.Phase == securityv1alpha1.ScanPhaseRegistered ||
-		imageScan.Status.Phase == securityv1alpha1.ScanPhaseFailed {
+	// If registered, we're done - no need to rescan
+	if imageScan.Status.Phase == securityv1alpha1.ScanPhaseRegistered {
+		return ctrl.Result{}, nil
+	}
 
-		// Optionally rescan after interval
+	// If failed, optionally rescan after interval
+	if imageScan.Status.Phase == securityv1alpha1.ScanPhaseFailed {
 		if r.RescanInterval > 0 && imageScan.Status.CompletedTime != nil {
 			elapsed := time.Since(imageScan.Status.CompletedTime.Time)
 			if elapsed >= r.RescanInterval {

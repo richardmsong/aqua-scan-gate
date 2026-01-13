@@ -1,0 +1,69 @@
+# Test deployment to verify the webhook is working
+# This deployment should trigger the mutating webhook which will inject
+# the scheduling gate 'scans.aquasec.community/aqua-scan'
+#
+# Usage:
+#   kubectl apply -f config/samples/test_deployment.yaml
+#   kubectl get pods -n default -o yaml | grep schedulingGates
+#   kubectl get imagescans -n default
+#
+# Expected behavior:
+#   1. Webhook intercepts pod creation
+#   2. Scheduling gate is injected
+#   3. Pod stays in SchedulingGated state
+#   4. ImageScan CR is created for nginx image
+#   5. Once scan passes, gate is removed and pod runs
+#
+# Cleanup:
+#   kubectl delete -f config/samples/test_deployment.yaml
+#   kubectl delete imagescans -n default --all
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-nginx
+  namespace: default
+  labels:
+    app: test-nginx
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: test-nginx
+  template:
+    metadata:
+      labels:
+        app: test-nginx
+    spec:
+      containers:
+      - name: nginx
+        # Tag-based image - digest will be resolved from registry (linux/amd64)
+        image: nginx:1.25.3
+        ports:
+        - containerPort: 80
+        resources:
+          limits:
+            cpu: 100m
+            memory: 128Mi
+          requests:
+            cpu: 50m
+            memory: 64Mi
+---
+# Test pod with bypass annotation (should NOT get scheduling gate)
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-bypass-pod
+  namespace: default
+  annotations:
+    scans.aquasec.community/bypass-scan: "true"
+  labels:
+    app: test-bypass
+spec:
+  containers:
+  - name: nginx
+    image: nginx:stable-alpine3.23-perl
+    resources:
+      limits:
+        cpu: 50m
+        memory: 64Mi

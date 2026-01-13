@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"strings"
 
@@ -20,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	securityv1alpha1 "github.com/richardmsong/aqua-scan-triggerer/api/v1alpha1"
+	"github.com/richardmsong/aqua-scan-triggerer/pkg/imageref"
 )
 
 const (
@@ -86,7 +86,7 @@ func (r *PodGateReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	// Extract all images from pod spec
-	images := extractImages(&pod)
+	images := imageref.ExtractFromPod(&pod)
 	if len(images) == 0 {
 		logger.Info("No images found in pod, removing gate", "pod", pod.Name)
 		removeSchedulingGate(&pod, SchedulingGateName)
@@ -98,7 +98,7 @@ func (r *PodGateReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	var pendingImages []string
 
 	for _, img := range images {
-		scanName := imageScanName(img)
+		scanName := imageref.ScanName(img)
 		scanNamespace := r.ScanNamespace
 		if scanNamespace == "" {
 			scanNamespace = pod.Namespace
@@ -112,18 +112,18 @@ func (r *PodGateReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 		if apierrors.IsNotFound(err) {
 			// Create ImageScan CR
-			logger.Info("Creating ImageScan", "image", img.image, "name", scanName)
+			logger.Info("Creating ImageScan", "image", img.Image, "name", scanName)
 			imageScan = securityv1alpha1.ImageScan{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      scanName,
 					Namespace: scanNamespace,
 					Labels: map[string]string{
-						"security.example.com/image-hash": hashString(img.image)[:16],
+						"security.example.com/image-hash": imageref.HashString(img.Image)[:16],
 					},
 				},
 				Spec: securityv1alpha1.ImageScanSpec{
-					Image:  img.image,
-					Digest: img.digest,
+					Image:  img.Image,
+					Digest: img.Digest,
 				},
 			}
 			if err := r.Create(ctx, &imageScan); err != nil {
@@ -133,7 +133,7 @@ func (r *PodGateReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				}
 			}
 			allPassed = false
-			pendingImages = append(pendingImages, img.image)
+			pendingImages = append(pendingImages, img.Image)
 			continue
 		} else if err != nil {
 			logger.Error(err, "Failed to get ImageScan")
@@ -149,14 +149,14 @@ func (r *PodGateReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			// Error occurred - don't remove gate, emit event
 			if r.Recorder != nil {
 				r.Recorder.Eventf(&pod, corev1.EventTypeWarning, "ScanError",
-					"Image %s scan error: %s", img.image, imageScan.Status.Message)
+					"Image %s scan error: %s", img.Image, imageScan.Status.Message)
 			}
 			allPassed = false
-			pendingImages = append(pendingImages, img.image)
+			pendingImages = append(pendingImages, img.Image)
 		default:
 			// Still pending
 			allPassed = false
-			pendingImages = append(pendingImages, img.image)
+			pendingImages = append(pendingImages, img.Image)
 		}
 	}
 
@@ -181,46 +181,6 @@ func (r *PodGateReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	return ctrl.Result{}, nil
 }
 
-type imageRef struct {
-	image  string
-	digest string
-}
-
-func extractImages(pod *corev1.Pod) []imageRef {
-	var images []imageRef
-	seen := make(map[string]bool)
-
-	addImage := func(image string) {
-		if image == "" || seen[image] {
-			return
-		}
-		seen[image] = true
-
-		// Extract digest if present in image reference
-		digest := ""
-		if idx := strings.Index(image, "@sha256:"); idx != -1 {
-			digest = image[idx+1:]
-		}
-
-		images = append(images, imageRef{
-			image:  image,
-			digest: digest,
-		})
-	}
-
-	for _, c := range pod.Spec.InitContainers {
-		addImage(c.Image)
-	}
-	for _, c := range pod.Spec.Containers {
-		addImage(c.Image)
-	}
-	for _, c := range pod.Spec.EphemeralContainers {
-		addImage(c.Image)
-	}
-
-	return images
-}
-
 func hasSchedulingGate(pod *corev1.Pod, gateName string) bool {
 	for _, gate := range pod.Spec.SchedulingGates {
 		if gate.Name == gateName {
@@ -238,20 +198,6 @@ func removeSchedulingGate(pod *corev1.Pod, gateName string) {
 		}
 	}
 	pod.Spec.SchedulingGates = filtered
-}
-
-func imageScanName(img imageRef) string {
-	// Use digest if available, otherwise hash the image reference
-	if img.digest != "" {
-		// sha256:abc123... -> sha256-abc123...
-		return strings.ReplaceAll(img.digest, ":", "-")[:63]
-	}
-	return fmt.Sprintf("img-%s", hashString(img.image)[:56])
-}
-
-func hashString(s string) string {
-	h := sha256.Sum256([]byte(s))
-	return fmt.Sprintf("%x", h)
 }
 
 func (r *PodGateReconciler) SetupWithManager(mgr ctrl.Manager) error {
@@ -325,9 +271,9 @@ func (r *PodGateReconciler) mapImageScanToPods(ctx context.Context, obj client.O
 		}
 
 		// Check if this pod references the image from this ImageScan
-		images := extractImages(&pod)
+		images := imageref.ExtractFromPod(&pod)
 		for _, img := range images {
-			scanName := imageScanName(img)
+			scanName := imageref.ScanName(img)
 			scanNamespace := r.ScanNamespace
 			if scanNamespace == "" {
 				scanNamespace = pod.Namespace

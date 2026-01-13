@@ -14,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	securityv1alpha1 "github.com/richardmsong/aqua-scan-triggerer/api/v1alpha1"
+	"github.com/richardmsong/aqua-scan-triggerer/pkg/imageref"
 )
 
 var _ = Describe("PodGateReconciler", func() {
@@ -51,7 +52,7 @@ var _ = Describe("PodGateReconciler", func() {
 				// Create a registered ImageScan
 				imageScan := &securityv1alpha1.ImageScan{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      imageScanName(imageRef{image: "nginx:latest"}),
+						Name:      imageref.ScanName(imageref.ImageRef{Image: "nginx:latest"}),
 						Namespace: "default",
 					},
 					Spec: securityv1alpha1.ImageScanSpec{
@@ -160,7 +161,7 @@ var _ = Describe("PodGateReconciler", func() {
 			It("should return no requests", func() {
 				pod := createPodWithGate("test-pod", "default", "nginx:latest")
 				imageScan := createImageScan(
-					imageScanName(imageRef{image: "nginx:latest"}),
+					imageref.ScanName(imageref.ImageRef{Image: "nginx:latest"}),
 					"default",
 					"nginx:latest",
 					securityv1alpha1.ScanPhasePending,
@@ -186,7 +187,7 @@ var _ = Describe("PodGateReconciler", func() {
 			It("should return requests for matching pods", func() {
 				pod := createPodWithGate("test-pod", "default", "nginx:latest")
 				imageScan := createImageScan(
-					imageScanName(imageRef{image: "nginx:latest"}),
+					imageref.ScanName(imageref.ImageRef{Image: "nginx:latest"}),
 					"default",
 					"nginx:latest",
 					securityv1alpha1.ScanPhaseRegistered,
@@ -214,7 +215,7 @@ var _ = Describe("PodGateReconciler", func() {
 			It("should return requests for matching pods", func() {
 				pod := createPodWithGate("test-pod", "default", "nginx:latest")
 				imageScan := createImageScan(
-					imageScanName(imageRef{image: "nginx:latest"}),
+					imageref.ScanName(imageref.ImageRef{Image: "nginx:latest"}),
 					"default",
 					"nginx:latest",
 					securityv1alpha1.ScanPhaseError,
@@ -242,7 +243,7 @@ var _ = Describe("PodGateReconciler", func() {
 			It("should not return requests for pods in excluded namespaces", func() {
 				pod := createPodWithGate("test-pod", "kube-system", "nginx:latest")
 				imageScan := createImageScan(
-					imageScanName(imageRef{image: "nginx:latest"}),
+					imageref.ScanName(imageref.ImageRef{Image: "nginx:latest"}),
 					"kube-system",
 					"nginx:latest",
 					securityv1alpha1.ScanPhaseRegistered,
@@ -269,7 +270,7 @@ var _ = Describe("PodGateReconciler", func() {
 			It("should not return requests for pods without our gate", func() {
 				pod := createPodWithoutGate("test-pod", "default", "nginx:latest")
 				imageScan := createImageScan(
-					imageScanName(imageRef{image: "nginx:latest"}),
+					imageref.ScanName(imageref.ImageRef{Image: "nginx:latest"}),
 					"default",
 					"nginx:latest",
 					securityv1alpha1.ScanPhaseRegistered,
@@ -296,7 +297,7 @@ var _ = Describe("PodGateReconciler", func() {
 				pod := createPodWithGate("test-pod", "default", "nginx:latest")
 				// ImageScan for a different image
 				imageScan := createImageScan(
-					imageScanName(imageRef{image: "redis:latest"}),
+					imageref.ScanName(imageref.ImageRef{Image: "redis:latest"}),
 					"default",
 					"redis:latest",
 					securityv1alpha1.ScanPhaseRegistered,
@@ -324,7 +325,7 @@ var _ = Describe("PodGateReconciler", func() {
 				pod2 := createPodWithGate("test-pod-2", "default", "nginx:latest")
 				pod3 := createPodWithGate("test-pod-3", "other-ns", "nginx:latest")
 				imageScan := createImageScan(
-					imageScanName(imageRef{image: "nginx:latest"}),
+					imageref.ScanName(imageref.ImageRef{Image: "nginx:latest"}),
 					"default",
 					"nginx:latest",
 					securityv1alpha1.ScanPhaseRegistered,
@@ -354,7 +355,7 @@ var _ = Describe("PodGateReconciler", func() {
 				// Pod in "app" namespace, but ImageScans are created in "scans" namespace
 				pod := createPodWithGate("test-pod", "app", "nginx:latest")
 				imageScan := createImageScan(
-					imageScanName(imageRef{image: "nginx:latest"}),
+					imageref.ScanName(imageref.ImageRef{Image: "nginx:latest"}),
 					"scans",
 					"nginx:latest",
 					securityv1alpha1.ScanPhaseRegistered,
@@ -418,7 +419,7 @@ var _ = Describe("PodGateReconciler", func() {
 					},
 				}
 				imageScan := createImageScan(
-					imageScanName(imageRef{image: "redis:latest"}),
+					imageref.ScanName(imageref.ImageRef{Image: "redis:latest"}),
 					"default",
 					"redis:latest",
 					securityv1alpha1.ScanPhaseRegistered,
@@ -461,7 +462,7 @@ var _ = Describe("PodGateReconciler", func() {
 					},
 				}
 				imageScan := createImageScan(
-					imageScanName(imageRef{image: "busybox:latest"}),
+					imageref.ScanName(imageref.ImageRef{Image: "busybox:latest"}),
 					"default",
 					"busybox:latest",
 					securityv1alpha1.ScanPhaseRegistered,

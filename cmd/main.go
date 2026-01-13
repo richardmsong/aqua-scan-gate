@@ -14,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
+	webhookserver "sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	securityv1alpha1 "github.com/richardmsong/aqua-scan-triggerer/api/v1alpha1"
 	"github.com/richardmsong/aqua-scan-triggerer/internal/controller"
@@ -41,6 +42,8 @@ func main() {
 		excludedNamespaces   string
 		scanNamespace        string
 		rescanInterval       time.Duration
+		webhookCertDir       string
+		webhookPort          int
 	)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
@@ -51,6 +54,8 @@ func main() {
 	flag.StringVar(&excludedNamespaces, "excluded-namespaces", "kube-system,kube-public,cert-manager", "Comma-separated namespaces to exclude")
 	flag.StringVar(&scanNamespace, "scan-namespace", "", "Namespace for ImageScan CRs (empty = same as pod)")
 	flag.DurationVar(&rescanInterval, "rescan-interval", 24*time.Hour, "Interval for rescanning images")
+	flag.StringVar(&webhookCertDir, "webhook-cert-dir", "/tmp/k8s-webhook-server/serving-certs", "Directory containing webhook TLS certificates")
+	flag.IntVar(&webhookPort, "webhook-port", 9443, "Port for the webhook server")
 
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
@@ -79,6 +84,10 @@ func main() {
 		Metrics: metricsserver.Options{
 			BindAddress: metricsAddr,
 		},
+		WebhookServer: webhookserver.NewServer(webhookserver.Options{
+			Port:    webhookPort,
+			CertDir: webhookCertDir,
+		}),
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "aqua-scan-gate.security.example.com",
 		HealthProbeBindAddress: probeAddr,

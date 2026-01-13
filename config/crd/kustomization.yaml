@@ -7,6 +7,8 @@ resources:
 
 # [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix.
 # patches here are for enabling the conversion webhook for each CRD
+# NOTE: Only enable this if you have multiple CRD versions that require conversion.
+# This project only has v1alpha1, so conversion webhook is not needed.
 #- path: patches/webhook_in_imagescans.yaml
 #+kubebuilder:scaffold:crdkustomizewebhookpatch
 

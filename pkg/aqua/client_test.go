@@ -20,61 +20,56 @@ func TestAquaClient(t *testing.T) {
 var _ = Describe("parseImageReference", func() {
 	Context("with various image reference formats", func() {
 		It("should parse image with registry and repository", func() {
-			registry, imageName, tag, err := parseImageReference(
+			containerRegistry, imageName, tag, err := parseImageReference(
 				"gcr.io/my-project/my-image:latest",
 				"sha256:abc123def456",
-				"",
 			)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(registry).To(Equal("gcr.io"))
+			Expect(containerRegistry).To(Equal("gcr.io"))
 			Expect(imageName).To(Equal("my-project/my-image"))
 			Expect(tag).To(Equal("@sha256:abc123def456"))
 		})
 
 		It("should parse Docker Hub image with repository", func() {
-			registry, imageName, tag, err := parseImageReference(
+			containerRegistry, imageName, tag, err := parseImageReference(
 				"richardmsong/jfrog-token-exchanger:v1.0",
 				"sha256:abc123",
-				"",
 			)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(registry).To(Equal("index.docker.io"))
+			Expect(containerRegistry).To(Equal("index.docker.io"))
 			Expect(imageName).To(Equal("richardmsong/jfrog-token-exchanger"))
 			Expect(tag).To(Equal("@sha256:abc123"))
 		})
 
 		It("should parse official Docker Hub image", func() {
-			registry, imageName, tag, err := parseImageReference(
+			containerRegistry, imageName, tag, err := parseImageReference(
 				"nginx:latest",
 				"sha256:xyz789",
-				"",
 			)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(registry).To(Equal("index.docker.io"))
+			Expect(containerRegistry).To(Equal("index.docker.io"))
 			Expect(imageName).To(Equal("library/nginx"))
 			Expect(tag).To(Equal("@sha256:xyz789"))
 		})
 
-		It("should use default registry when provided", func() {
-			registry, imageName, tag, err := parseImageReference(
-				"gcr.io/project/image:tag",
+		It("should parse ghcr.io image", func() {
+			containerRegistry, imageName, tag, err := parseImageReference(
+				"ghcr.io/myorg/myimage:v1.0",
 				"sha256:abc123",
-				"my-aqua-registry",
 			)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(registry).To(Equal("my-aqua-registry"))
-			Expect(imageName).To(Equal("project/image"))
+			Expect(containerRegistry).To(Equal("ghcr.io"))
+			Expect(imageName).To(Equal("myorg/myimage"))
 			Expect(tag).To(Equal("@sha256:abc123"))
 		})
 
 		It("should handle image with port in registry", func() {
-			registry, imageName, tag, err := parseImageReference(
+			containerRegistry, imageName, tag, err := parseImageReference(
 				"registry.example.com:5000/my-image:v1",
 				"sha256:abc123",
-				"",
 			)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(registry).To(Equal("registry.example.com:5000"))
+			Expect(containerRegistry).To(Equal("registry.example.com:5000"))
 			Expect(imageName).To(Equal("my-image"))
 			Expect(tag).To(Equal("@sha256:abc123"))
 		})
@@ -83,7 +78,6 @@ var _ = Describe("parseImageReference", func() {
 			_, _, _, err := parseImageReference(
 				"",
 				"sha256:abc123",
-				"",
 			)
 			Expect(err).To(HaveOccurred())
 		})
@@ -324,5 +318,209 @@ var _ = Describe("NewClient", func() {
 		})
 
 		Expect(client).NotTo(BeNil())
+	})
+})
+
+var _ = Describe("GetRegistries", func() {
+	var (
+		server *httptest.Server
+		client Client
+	)
+
+	AfterEach(func() {
+		if server != nil {
+			server.Close()
+		}
+	})
+
+	Context("when registries are fetched successfully", func() {
+		BeforeEach(func() {
+			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				Expect(r.Method).To(Equal("GET"))
+				Expect(r.URL.Path).To(Equal("/api/v2/registries"))
+				Expect(r.Header.Get("Authorization")).To(Equal("Bearer test-api-key"))
+
+				resp := RegistriesResponse{
+					Count:    2,
+					Page:     1,
+					PageSize: 100,
+					Result: []Registry{
+						{
+							Name:     "github-registry",
+							Type:     "ghcr",
+							Prefixes: []string{"ghcr.io"},
+						},
+						{
+							Name:     "docker-hub",
+							Type:     "docker",
+							Prefixes: []string{"docker.io", "index.docker.io"},
+						},
+					},
+				}
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode(resp)
+			}))
+
+			client = NewClient(Config{
+				BaseURL: server.URL,
+				APIKey:  "test-api-key",
+			})
+		})
+
+		It("should return list of registries", func() {
+			registries, err := client.GetRegistries(context.Background())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registries).To(HaveLen(2))
+			Expect(registries[0].Name).To(Equal("github-registry"))
+			Expect(registries[0].Prefixes).To(ContainElement("ghcr.io"))
+			Expect(registries[1].Name).To(Equal("docker-hub"))
+		})
+	})
+
+	Context("when API returns an error", func() {
+		BeforeEach(func() {
+			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`{"error": "database error"}`))
+			}))
+
+			client = NewClient(Config{
+				BaseURL: server.URL,
+				APIKey:  "test-api-key",
+			})
+		})
+
+		It("should return error", func() {
+			_, err := client.GetRegistries(context.Background())
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("500"))
+		})
+	})
+})
+
+var _ = Describe("FindRegistryByPrefix", func() {
+	var (
+		server *httptest.Server
+		client Client
+	)
+
+	AfterEach(func() {
+		if server != nil {
+			server.Close()
+		}
+	})
+
+	Context("when default registry is configured", func() {
+		BeforeEach(func() {
+			client = NewClient(Config{
+				BaseURL:  "https://api.aquasec.com",
+				APIKey:   "test-api-key",
+				Registry: "my-default-registry",
+			})
+		})
+
+		It("should return the configured default registry", func() {
+			registry, err := client.FindRegistryByPrefix(context.Background(), "ghcr.io")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registry).To(Equal("my-default-registry"))
+		})
+	})
+
+	Context("when looking up registry by prefix", func() {
+		BeforeEach(func() {
+			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				resp := RegistriesResponse{
+					Count:    3,
+					Page:     1,
+					PageSize: 100,
+					Result: []Registry{
+						{
+							Name:     "github-registry",
+							Type:     "ghcr",
+							Prefixes: []string{"ghcr.io"},
+						},
+						{
+							Name:     "docker-hub",
+							Type:     "docker",
+							Prefixes: []string{"docker.io", "index.docker.io"},
+						},
+						{
+							Name:     "gcr-registry",
+							Type:     "gcr",
+							Prefixes: []string{"gcr.io", "us.gcr.io", "eu.gcr.io"},
+						},
+					},
+				}
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode(resp)
+			}))
+
+			client = NewClient(Config{
+				BaseURL: server.URL,
+				APIKey:  "test-api-key",
+			})
+		})
+
+		It("should find registry for ghcr.io", func() {
+			registry, err := client.FindRegistryByPrefix(context.Background(), "ghcr.io")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registry).To(Equal("github-registry"))
+		})
+
+		It("should find registry for docker.io", func() {
+			registry, err := client.FindRegistryByPrefix(context.Background(), "docker.io")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registry).To(Equal("docker-hub"))
+		})
+
+		It("should find registry for index.docker.io", func() {
+			registry, err := client.FindRegistryByPrefix(context.Background(), "index.docker.io")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registry).To(Equal("docker-hub"))
+		})
+
+		It("should find registry for gcr.io", func() {
+			registry, err := client.FindRegistryByPrefix(context.Background(), "gcr.io")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registry).To(Equal("gcr-registry"))
+		})
+
+		It("should return error for unknown registry", func() {
+			_, err := client.FindRegistryByPrefix(context.Background(), "unknown.registry.io")
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("no Aqua registry found"))
+		})
+	})
+
+	Context("when prefix has protocol or trailing slash", func() {
+		BeforeEach(func() {
+			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				resp := RegistriesResponse{
+					Count:    1,
+					Page:     1,
+					PageSize: 100,
+					Result: []Registry{
+						{
+							Name:     "github-registry",
+							Type:     "ghcr",
+							Prefixes: []string{"https://ghcr.io/"},
+						},
+					},
+				}
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode(resp)
+			}))
+
+			client = NewClient(Config{
+				BaseURL: server.URL,
+				APIKey:  "test-api-key",
+			})
+		})
+
+		It("should normalize and match registry with protocol", func() {
+			registry, err := client.FindRegistryByPrefix(context.Background(), "ghcr.io")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registry).To(Equal("github-registry"))
+		})
 	})
 })

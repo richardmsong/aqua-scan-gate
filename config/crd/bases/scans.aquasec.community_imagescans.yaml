@@ -154,6 +154,10 @@ spec:
                 - Failed
                 - Error
                 type: string
+              retryCount:
+                description: RetryCount tracks the number of consecutive errors for
+                  exponential backoff
+                type: integer
               vulnerabilities:
                 description: Vulnerabilities contains the summary of found vulnerabilities
                 properties:

@@ -34,30 +34,24 @@ func (r *ImageScanReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// If registered, we're done - no need to rescan
-	if imageScan.Status.Phase == securityv1alpha1.ScanPhaseRegistered {
-		return ctrl.Result{}, nil
+	// Handle error state with exponential backoff
+	if imageScan.Status.Phase == securityv1alpha1.ScanPhaseError {
+		// Calculate backoff: base of 30 seconds, doubling each retry, max 10 minutes
+		backoff := time.Duration(30<<imageScan.Status.RetryCount) * time.Second
+		maxBackoff := 10 * time.Minute
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+		logger.Info("Retrying after error with exponential backoff",
+			"image", imageScan.Spec.Image,
+			"retryCount", imageScan.Status.RetryCount,
+			"backoff", backoff)
+		return ctrl.Result{RequeueAfter: backoff}, nil
 	}
 
-	// If failed, optionally rescan after interval
-	if imageScan.Status.Phase == securityv1alpha1.ScanPhaseFailed {
-		if r.RescanInterval > 0 && imageScan.Status.CompletedTime != nil {
-			elapsed := time.Since(imageScan.Status.CompletedTime.Time)
-			if elapsed >= r.RescanInterval {
-				logger.Info("Triggering rescan due to interval", "image", imageScan.Spec.Image)
-				imageScan.Status.Phase = securityv1alpha1.ScanPhasePending
-				imageScan.Status.Message = "Rescan triggered"
-				if updateErr := r.Status().Update(ctx, &imageScan); updateErr != nil {
-					logger.Error(updateErr, "Failed to update ImageScan status for rescan")
-					return ctrl.Result{}, updateErr
-				}
-			} else {
-				// Requeue for when rescan is due
-				return ctrl.Result{RequeueAfter: r.RescanInterval - elapsed}, nil
-			}
-		} else {
-			return ctrl.Result{}, nil
-		}
+	// If already registered, no need to rescan
+	if imageScan.Status.Phase == securityv1alpha1.ScanPhaseRegistered {
+		return ctrl.Result{}, nil
 	}
 
 	// Check current scan status in Aqua
@@ -67,10 +61,17 @@ func (r *ImageScanReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		logger.Error(err, "Failed to get scan result from Aqua")
 		imageScan.Status.Phase = securityv1alpha1.ScanPhaseError
 		imageScan.Status.Message = err.Error()
+		imageScan.Status.RetryCount++
 		if updateErr := r.Status().Update(ctx, &imageScan); updateErr != nil {
 			logger.Error(updateErr, "Failed to update ImageScan status")
 		}
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		// Calculate backoff for next retry
+		backoff := time.Duration(30<<imageScan.Status.RetryCount) * time.Second
+		maxBackoff := 10 * time.Minute
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+		return ctrl.Result{RequeueAfter: backoff}, nil
 	}
 
 	switch result.Status {
@@ -82,11 +83,22 @@ func (r *ImageScanReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			logger.Error(err, "Failed to trigger scan")
 			imageScan.Status.Phase = securityv1alpha1.ScanPhaseError
 			imageScan.Status.Message = err.Error()
-		} else {
-			imageScan.Status.Phase = securityv1alpha1.ScanPhaseInProgress
-			imageScan.Status.AquaScanID = scanID
-			imageScan.Status.Message = "Scan triggered, waiting for Aqua to process"
+			imageScan.Status.RetryCount++
+			if updateErr := r.Status().Update(ctx, &imageScan); updateErr != nil {
+				return ctrl.Result{}, updateErr
+			}
+			// Calculate backoff for next retry
+			backoff := time.Duration(30<<imageScan.Status.RetryCount) * time.Second
+			maxBackoff := 10 * time.Minute
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+			return ctrl.Result{RequeueAfter: backoff}, nil
 		}
+		imageScan.Status.Phase = securityv1alpha1.ScanPhasePending
+		imageScan.Status.AquaScanID = scanID
+		imageScan.Status.Message = "Scan triggered, waiting for Aqua to process"
+		imageScan.Status.RetryCount = 0 // Reset retry count on success
 		if updateErr := r.Status().Update(ctx, &imageScan); updateErr != nil {
 			return ctrl.Result{}, updateErr
 		}
@@ -101,6 +113,7 @@ func (r *ImageScanReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		imageScan.Status.CompletedTime = &now
 		imageScan.Status.Phase = securityv1alpha1.ScanPhaseRegistered
 		imageScan.Status.Message = "Image registered in Aqua"
+		imageScan.Status.RetryCount = 0 // Reset retry count on success
 
 		logger.Info("Image registered in Aqua",
 			"image", imageScan.Spec.Image,

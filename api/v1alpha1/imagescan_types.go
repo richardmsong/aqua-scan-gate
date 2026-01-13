@@ -70,6 +70,10 @@ type ImageScanStatus struct {
 	// Conditions represent the latest available observations
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// RetryCount tracks the number of consecutive errors for exponential backoff
+	// +optional
+	RetryCount int `json:"retryCount,omitempty"`
 }
 
 // +kubebuilder:object:root=true

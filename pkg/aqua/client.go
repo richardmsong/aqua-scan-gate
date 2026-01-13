@@ -224,11 +224,5 @@ func (c *aquaClient) TriggerScan(ctx context.Context, image, digest string) (str
 		return fmt.Sprintf("%s/%s", registry, imageWithDigest), nil
 	}
 
-	// Handle other status codes
-	if resp.StatusCode == http.StatusConflict {
-		// Image already exists/being scanned - this is OK
-		return fmt.Sprintf("%s/%s", registry, imageWithDigest), nil
-	}
-
 	return "", fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 }

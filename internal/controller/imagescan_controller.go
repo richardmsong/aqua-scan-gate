@@ -14,6 +14,24 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+const (
+	baseBackoff = 30 * time.Second
+	maxBackoff  = 10 * time.Minute
+)
+
+// calculateBackoff returns an exponential backoff duration based on retry count.
+// It uses multiplication (doubling) for clarity and caps at maxBackoff.
+func calculateBackoff(retryCount int) time.Duration {
+	backoff := baseBackoff
+	for i := 0; i < retryCount && backoff < maxBackoff; i++ {
+		backoff *= 2
+	}
+	if backoff > maxBackoff {
+		backoff = maxBackoff
+	}
+	return backoff
+}
+
 // ImageScanReconciler reconciles a ImageScan object
 type ImageScanReconciler struct {
 	client.Client
@@ -36,12 +54,7 @@ func (r *ImageScanReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	// Handle error state with exponential backoff
 	if imageScan.Status.Phase == securityv1alpha1.ScanPhaseError {
-		// Calculate backoff: base of 30 seconds, doubling each retry, max 10 minutes
-		backoff := time.Duration(30<<imageScan.Status.RetryCount) * time.Second
-		maxBackoff := 10 * time.Minute
-		if backoff > maxBackoff {
-			backoff = maxBackoff
-		}
+		backoff := calculateBackoff(imageScan.Status.RetryCount)
 		logger.Info("Retrying after error with exponential backoff",
 			"image", imageScan.Spec.Image,
 			"retryCount", imageScan.Status.RetryCount,
@@ -65,13 +78,7 @@ func (r *ImageScanReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if updateErr := r.Status().Update(ctx, &imageScan); updateErr != nil {
 			logger.Error(updateErr, "Failed to update ImageScan status")
 		}
-		// Calculate backoff for next retry
-		backoff := time.Duration(30<<imageScan.Status.RetryCount) * time.Second
-		maxBackoff := 10 * time.Minute
-		if backoff > maxBackoff {
-			backoff = maxBackoff
-		}
-		return ctrl.Result{RequeueAfter: backoff}, nil
+		return ctrl.Result{RequeueAfter: calculateBackoff(imageScan.Status.RetryCount)}, nil
 	}
 
 	switch result.Status {
@@ -87,13 +94,7 @@ func (r *ImageScanReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			if updateErr := r.Status().Update(ctx, &imageScan); updateErr != nil {
 				return ctrl.Result{}, updateErr
 			}
-			// Calculate backoff for next retry
-			backoff := time.Duration(30<<imageScan.Status.RetryCount) * time.Second
-			maxBackoff := 10 * time.Minute
-			if backoff > maxBackoff {
-				backoff = maxBackoff
-			}
-			return ctrl.Result{RequeueAfter: backoff}, nil
+			return ctrl.Result{RequeueAfter: calculateBackoff(imageScan.Status.RetryCount)}, nil
 		}
 		imageScan.Status.Phase = securityv1alpha1.ScanPhasePending
 		imageScan.Status.AquaScanID = scanID

@@ -34,6 +34,9 @@ const (
 
 	// LabelManagedBy identifies pods managed by this controller
 	LabelManagedBy = "scans.aquasec.community/managed-by"
+
+	// IndexFieldSchedulingGate is the field name for the scheduling gate index
+	IndexFieldSchedulingGate = "spec.schedulingGates.name"
 )
 
 // PodGateReconciler reconciles Pods with our scheduling gate
@@ -252,6 +255,26 @@ func hashString(s string) string {
 }
 
 func (r *PodGateReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Set up field indexer for efficient pod listing by scheduling gate
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(),
+		&corev1.Pod{},
+		IndexFieldSchedulingGate,
+		func(obj client.Object) []string {
+			pod, ok := obj.(*corev1.Pod)
+			if !ok {
+				return nil
+			}
+			var gates []string
+			for _, gate := range pod.Spec.SchedulingGates {
+				gates = append(gates, gate.Name)
+			}
+			return gates
+		},
+	); err != nil {
+		return fmt.Errorf("failed to set up field indexer: %w", err)
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.Pod{}).
 		WithEventFilter(predicate.NewPredicateFuncs(func(obj client.Object) bool {
@@ -285,9 +308,11 @@ func (r *PodGateReconciler) mapImageScanToPods(ctx context.Context, obj client.O
 		return nil
 	}
 
-	// List all pods with our scheduling gate
+	// List only pods with our scheduling gate using the field indexer
 	var podList corev1.PodList
-	if err := r.List(ctx, &podList); err != nil {
+	if err := r.List(ctx, &podList, client.MatchingFields{
+		IndexFieldSchedulingGate: SchedulingGateName,
+	}); err != nil {
 		logger.Error(err, "Failed to list pods for ImageScan mapping")
 		return nil
 	}
@@ -296,11 +321,6 @@ func (r *PodGateReconciler) mapImageScanToPods(ctx context.Context, obj client.O
 	for _, pod := range podList.Items {
 		// Skip excluded namespaces
 		if r.ExcludedNamespaces[pod.Namespace] {
-			continue
-		}
-
-		// Only consider pods with our gate
-		if !hasSchedulingGate(&pod, SchedulingGateName) {
 			continue
 		}
 

@@ -97,6 +97,19 @@ var _ = Describe("PodGateReconciler", func() {
 			r          *PodGateReconciler
 		)
 
+		// indexerFunc extracts scheduling gate names for the field indexer
+		indexerFunc := func(obj client.Object) []string {
+			pod, ok := obj.(*corev1.Pod)
+			if !ok {
+				return nil
+			}
+			var gates []string
+			for _, gate := range pod.Spec.SchedulingGates {
+				gates = append(gates, gate.Name)
+			}
+			return gates
+		}
+
 		createPodWithGate := func(name, namespace, image string) *corev1.Pod {
 			return &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
@@ -156,6 +169,7 @@ var _ = Describe("PodGateReconciler", func() {
 				fakeClient = fake.NewClientBuilder().
 					WithScheme(scheme).
 					WithObjects(pod, imageScan).
+					WithIndex(&corev1.Pod{}, IndexFieldSchedulingGate, indexerFunc).
 					Build()
 
 				r = &PodGateReconciler{
@@ -181,6 +195,7 @@ var _ = Describe("PodGateReconciler", func() {
 				fakeClient = fake.NewClientBuilder().
 					WithScheme(scheme).
 					WithObjects(pod, imageScan).
+					WithIndex(&corev1.Pod{}, IndexFieldSchedulingGate, indexerFunc).
 					Build()
 
 				r = &PodGateReconciler{
@@ -208,6 +223,7 @@ var _ = Describe("PodGateReconciler", func() {
 				fakeClient = fake.NewClientBuilder().
 					WithScheme(scheme).
 					WithObjects(pod, imageScan).
+					WithIndex(&corev1.Pod{}, IndexFieldSchedulingGate, indexerFunc).
 					Build()
 
 				r = &PodGateReconciler{
@@ -235,6 +251,7 @@ var _ = Describe("PodGateReconciler", func() {
 				fakeClient = fake.NewClientBuilder().
 					WithScheme(scheme).
 					WithObjects(pod, imageScan).
+					WithIndex(&corev1.Pod{}, IndexFieldSchedulingGate, indexerFunc).
 					Build()
 
 				r = &PodGateReconciler{
@@ -261,6 +278,7 @@ var _ = Describe("PodGateReconciler", func() {
 				fakeClient = fake.NewClientBuilder().
 					WithScheme(scheme).
 					WithObjects(pod, imageScan).
+					WithIndex(&corev1.Pod{}, IndexFieldSchedulingGate, indexerFunc).
 					Build()
 
 				r = &PodGateReconciler{
@@ -287,6 +305,7 @@ var _ = Describe("PodGateReconciler", func() {
 				fakeClient = fake.NewClientBuilder().
 					WithScheme(scheme).
 					WithObjects(pod, imageScan).
+					WithIndex(&corev1.Pod{}, IndexFieldSchedulingGate, indexerFunc).
 					Build()
 
 				r = &PodGateReconciler{
@@ -314,6 +333,7 @@ var _ = Describe("PodGateReconciler", func() {
 				fakeClient = fake.NewClientBuilder().
 					WithScheme(scheme).
 					WithObjects(pod1, pod2, pod3, imageScan).
+					WithIndex(&corev1.Pod{}, IndexFieldSchedulingGate, indexerFunc).
 					Build()
 
 				r = &PodGateReconciler{
@@ -343,6 +363,7 @@ var _ = Describe("PodGateReconciler", func() {
 				fakeClient = fake.NewClientBuilder().
 					WithScheme(scheme).
 					WithObjects(pod, imageScan).
+					WithIndex(&corev1.Pod{}, IndexFieldSchedulingGate, indexerFunc).
 					Build()
 
 				r = &PodGateReconciler{
@@ -365,6 +386,7 @@ var _ = Describe("PodGateReconciler", func() {
 				fakeClient = fake.NewClientBuilder().
 					WithScheme(scheme).
 					WithObjects(pod).
+					WithIndex(&corev1.Pod{}, IndexFieldSchedulingGate, indexerFunc).
 					Build()
 
 				r = &PodGateReconciler{
@@ -405,6 +427,7 @@ var _ = Describe("PodGateReconciler", func() {
 				fakeClient = fake.NewClientBuilder().
 					WithScheme(scheme).
 					WithObjects(pod, imageScan).
+					WithIndex(&corev1.Pod{}, IndexFieldSchedulingGate, indexerFunc).
 					Build()
 
 				r = &PodGateReconciler{
@@ -447,6 +470,7 @@ var _ = Describe("PodGateReconciler", func() {
 				fakeClient = fake.NewClientBuilder().
 					WithScheme(scheme).
 					WithObjects(pod, imageScan).
+					WithIndex(&corev1.Pod{}, IndexFieldSchedulingGate, indexerFunc).
 					Build()
 
 				r = &PodGateReconciler{

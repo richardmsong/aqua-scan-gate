@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- scans.aquasec.community_v1alpha1_imagescan.yaml
+#+kubebuilder:scaffold:manifestskustomizesamples

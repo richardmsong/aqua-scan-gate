@@ -76,17 +76,9 @@ func NewClient(config Config) Client {
 		Timeout: config.Timeout,
 	}
 
-	// Handle backward compatibility: if APIKey is set but Auth is not configured
-	if config.APIKey != "" && config.Auth.Mode == "" {
-		config.Auth = AuthConfig{
-			Mode:  AuthModeToken,
-			Token: config.APIKey,
-		}
-	}
-
-	// Default to token mode if not specified
-	if config.Auth.Mode == "" {
-		config.Auth.Mode = AuthModeToken
+	// Handle backward compatibility: if APIKey is set but Auth.Token is not configured
+	if config.APIKey != "" && config.Auth.Token == "" {
+		config.Auth.Token = config.APIKey
 	}
 
 	tokenManager := NewTokenManager(config.BaseURL, config.Auth, httpClient)
@@ -147,11 +139,8 @@ func (c *aquaClient) GetScanResult(ctx context.Context, image, digest string) (*
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
 
-	// Get token and set authorization header
-	token, err := c.tokenManager.GetToken(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("getting auth token: %w", err)
-	}
+	// Set authorization header
+	token := c.tokenManager.GetToken()
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
 
@@ -232,11 +221,8 @@ func (c *aquaClient) TriggerScan(ctx context.Context, image, digest string) (str
 		return "", fmt.Errorf("creating request: %w", err)
 	}
 
-	// Get token and set authorization header
-	token, err := c.tokenManager.GetToken(ctx)
-	if err != nil {
-		return "", fmt.Errorf("getting auth token: %w", err)
-	}
+	// Set authorization header
+	token := c.tokenManager.GetToken()
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")

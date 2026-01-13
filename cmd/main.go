@@ -38,10 +38,7 @@ func main() {
 		enableLeaderElection bool
 		aquaURL              string
 		aquaAPIKey           string
-		aquaUsername         string
-		aquaPassword         string
 		aquaHMACSecret       string
-		aquaAuthMode         string
 		excludedNamespaces   string
 		scanNamespace        string
 		rescanInterval       time.Duration
@@ -51,11 +48,8 @@ func main() {
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false, "Enable leader election.")
 	flag.StringVar(&aquaURL, "aqua-url", os.Getenv("AQUA_URL"), "Aqua server URL")
-	flag.StringVar(&aquaAPIKey, "aqua-api-key", os.Getenv("AQUA_API_KEY"), "Aqua API key (for token auth mode)")
-	flag.StringVar(&aquaUsername, "aqua-username", os.Getenv("AQUA_USERNAME"), "Aqua username (for credentials auth mode)")
-	flag.StringVar(&aquaPassword, "aqua-password", os.Getenv("AQUA_PASSWORD"), "Aqua password (for credentials auth mode)")
+	flag.StringVar(&aquaAPIKey, "aqua-api-key", os.Getenv("AQUA_API_KEY"), "Aqua API key for authentication")
 	flag.StringVar(&aquaHMACSecret, "aqua-hmac-secret", os.Getenv("AQUA_HMAC_SECRET"), "HMAC secret for request signing (optional)")
-	flag.StringVar(&aquaAuthMode, "aqua-auth-mode", os.Getenv("AQUA_AUTH_MODE"), "Authentication mode: 'token' or 'credentials' (default: auto-detect)")
 	flag.StringVar(&excludedNamespaces, "excluded-namespaces", "kube-system,kube-public,cert-manager", "Comma-separated namespaces to exclude")
 	flag.StringVar(&scanNamespace, "scan-namespace", "", "Namespace for ImageScan CRs (empty = same as pod)")
 	flag.DurationVar(&rescanInterval, "rescan-interval", 24*time.Hour, "Interval for rescanning images")
@@ -75,13 +69,13 @@ func main() {
 		}
 	}
 
-	// Determine auth mode and create auth config
-	authConfig := buildAuthConfig(aquaAuthMode, aquaAPIKey, aquaUsername, aquaPassword, aquaHMACSecret)
-
 	// Create Aqua client
 	aquaClient := aqua.NewClient(aqua.Config{
 		BaseURL: aquaURL,
-		Auth:    authConfig,
+		Auth: aqua.AuthConfig{
+			Token:      aquaAPIKey,
+			HMACSecret: aquaHMACSecret,
+		},
 		Timeout: 30 * time.Second,
 	})
 
@@ -144,35 +138,4 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
-}
-
-// buildAuthConfig creates an AuthConfig based on provided parameters
-// It auto-detects the auth mode if not explicitly specified
-func buildAuthConfig(mode, apiKey, username, password, hmacSecret string) aqua.AuthConfig {
-	authConfig := aqua.AuthConfig{
-		HMACSecret: hmacSecret,
-	}
-
-	// Determine auth mode
-	switch mode {
-	case "token":
-		authConfig.Mode = aqua.AuthModeToken
-		authConfig.Token = apiKey
-	case "credentials":
-		authConfig.Mode = aqua.AuthModeCredentials
-		authConfig.Username = username
-		authConfig.Password = password
-	default:
-		// Auto-detect based on what's provided
-		if username != "" && password != "" {
-			authConfig.Mode = aqua.AuthModeCredentials
-			authConfig.Username = username
-			authConfig.Password = password
-		} else if apiKey != "" {
-			authConfig.Mode = aqua.AuthModeToken
-			authConfig.Token = apiKey
-		}
-	}
-
-	return authConfig
 }

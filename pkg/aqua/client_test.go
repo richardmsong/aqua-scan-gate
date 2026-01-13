@@ -524,3 +524,177 @@ var _ = Describe("FindRegistryByPrefix", func() {
 		})
 	})
 })
+
+var _ = Describe("Registry Caching", func() {
+	var (
+		server   *httptest.Server
+		client   Client
+		apiCalls int
+	)
+
+	AfterEach(func() {
+		if server != nil {
+			server.Close()
+		}
+	})
+
+	Context("when GetRegistries is called multiple times within TTL", func() {
+		BeforeEach(func() {
+			apiCalls = 0
+			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				apiCalls++
+				resp := RegistriesResponse{
+					Count:    1,
+					Page:     1,
+					PageSize: 100,
+					Result: []Registry{
+						{
+							Name:     "github-registry",
+							Type:     "ghcr",
+							Prefixes: []string{"ghcr.io"},
+						},
+					},
+				}
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode(resp)
+			}))
+
+			client = NewClient(Config{
+				BaseURL:  server.URL,
+				APIKey:   "test-api-key",
+				CacheTTL: 1 * time.Hour,
+			})
+		})
+
+		It("should only call API once and return cached results", func() {
+			// First call - should hit API
+			registries1, err := client.GetRegistries(context.Background())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registries1).To(HaveLen(1))
+			Expect(apiCalls).To(Equal(1))
+
+			// Second call - should use cache
+			registries2, err := client.GetRegistries(context.Background())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registries2).To(HaveLen(1))
+			Expect(apiCalls).To(Equal(1)) // Still 1 - no new API call
+
+			// Third call - should still use cache
+			registries3, err := client.GetRegistries(context.Background())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registries3).To(HaveLen(1))
+			Expect(apiCalls).To(Equal(1)) // Still 1 - no new API call
+		})
+	})
+
+	Context("when cache TTL expires", func() {
+		BeforeEach(func() {
+			apiCalls = 0
+			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				apiCalls++
+				resp := RegistriesResponse{
+					Count:    1,
+					Page:     1,
+					PageSize: 100,
+					Result: []Registry{
+						{
+							Name:     "github-registry",
+							Type:     "ghcr",
+							Prefixes: []string{"ghcr.io"},
+						},
+					},
+				}
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode(resp)
+			}))
+
+			// Use a very short TTL for testing expiration
+			client = NewClient(Config{
+				BaseURL:  server.URL,
+				APIKey:   "test-api-key",
+				CacheTTL: 1 * time.Millisecond,
+			})
+		})
+
+		It("should refresh cache after TTL expires", func() {
+			// First call - should hit API
+			_, err := client.GetRegistries(context.Background())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(apiCalls).To(Equal(1))
+
+			// Wait for cache to expire
+			time.Sleep(10 * time.Millisecond)
+
+			// Second call - cache expired, should hit API again
+			_, err = client.GetRegistries(context.Background())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(apiCalls).To(Equal(2))
+		})
+	})
+
+	Context("when FindRegistryByPrefix does not find match in cache", func() {
+		var registryList []Registry
+
+		BeforeEach(func() {
+			apiCalls = 0
+			// Start with only ghcr.io in the registry list
+			registryList = []Registry{
+				{
+					Name:     "github-registry",
+					Type:     "ghcr",
+					Prefixes: []string{"ghcr.io"},
+				},
+			}
+
+			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				apiCalls++
+				resp := RegistriesResponse{
+					Count:    len(registryList),
+					Page:     1,
+					PageSize: 100,
+					Result:   registryList,
+				}
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode(resp)
+			}))
+
+			client = NewClient(Config{
+				BaseURL:  server.URL,
+				APIKey:   "test-api-key",
+				CacheTTL: 1 * time.Hour,
+			})
+		})
+
+		It("should refresh cache when registry not found and find it after refresh", func() {
+			// First lookup for ghcr.io - should work with initial cache
+			registry, err := client.FindRegistryByPrefix(context.Background(), "ghcr.io")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registry).To(Equal("github-registry"))
+			// First call populates cache, then lookup succeeds without refresh
+			Expect(apiCalls).To(Equal(1))
+
+			// Add docker-hub to the registry list (simulating server-side change)
+			registryList = append(registryList, Registry{
+				Name:     "docker-hub",
+				Type:     "docker",
+				Prefixes: []string{"docker.io", "index.docker.io"},
+			})
+
+			// Lookup docker.io - not in cache, should trigger refresh
+			registry, err = client.FindRegistryByPrefix(context.Background(), "docker.io")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registry).To(Equal("docker-hub"))
+			// Should have made a refresh call (cache hit first, then refresh on miss)
+			Expect(apiCalls).To(Equal(2))
+		})
+
+		It("should return error if registry not found even after refresh", func() {
+			// Lookup unknown registry
+			_, err := client.FindRegistryByPrefix(context.Background(), "unknown.registry.io")
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("no Aqua registry found"))
+			// Should have made 2 API calls (initial cache miss + refresh)
+			Expect(apiCalls).To(Equal(2))
+		})
+	})
+})

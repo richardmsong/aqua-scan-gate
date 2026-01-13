@@ -9,10 +9,14 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/go-containerregistry/pkg/name"
 )
+
+// DefaultCacheTTL is the default time-to-live for cached registry data
+const DefaultCacheTTL = 1 * time.Hour
 
 // ScanStatus represents the status returned by Aqua
 type ScanStatus string
@@ -79,17 +83,33 @@ type Config struct {
 
 	// InsecureSkipVerify disables TLS verification (not recommended for production)
 	InsecureSkipVerify bool
+
+	// CacheTTL is the time-to-live for cached registry data (default: 1 hour)
+	CacheTTL time.Duration
+}
+
+// registryCache holds cached registry data with timestamp
+type registryCache struct {
+	registries []Registry
+	fetchedAt  time.Time
 }
 
 type aquaClient struct {
 	config     Config
 	httpClient *http.Client
+
+	// Cache for registries
+	cacheMu sync.RWMutex
+	cache   *registryCache
 }
 
 // NewClient creates a new Aqua client
 func NewClient(config Config) Client {
 	if config.Timeout == 0 {
 		config.Timeout = 30 * time.Second
+	}
+	if config.CacheTTL == 0 {
+		config.CacheTTL = DefaultCacheTTL
 	}
 
 	return &aquaClient{
@@ -255,6 +275,21 @@ func (c *aquaClient) TriggerScan(ctx context.Context, image, digest string) (str
 }
 
 func (c *aquaClient) GetRegistries(ctx context.Context) ([]Registry, error) {
+	// Check cache first with read lock
+	c.cacheMu.RLock()
+	if c.cache != nil && time.Since(c.cache.fetchedAt) < c.config.CacheTTL {
+		registries := c.cache.registries
+		c.cacheMu.RUnlock()
+		return registries, nil
+	}
+	c.cacheMu.RUnlock()
+
+	// Cache miss or expired, fetch from API
+	return c.fetchRegistries(ctx)
+}
+
+// fetchRegistries fetches registries from the API and updates the cache
+func (c *aquaClient) fetchRegistries(ctx context.Context) ([]Registry, error) {
 	// GET /api/v2/registries
 	// Returns all configured registries in Aqua
 
@@ -289,7 +324,20 @@ func (c *aquaClient) GetRegistries(ctx context.Context) ([]Registry, error) {
 		return nil, fmt.Errorf("decoding response: %w", err)
 	}
 
+	// Update cache with write lock
+	c.cacheMu.Lock()
+	c.cache = &registryCache{
+		registries: registriesResp.Result,
+		fetchedAt:  time.Now(),
+	}
+	c.cacheMu.Unlock()
+
 	return registriesResp.Result, nil
+}
+
+// refreshCache forces a cache refresh by fetching registries from the API
+func (c *aquaClient) refreshCache(ctx context.Context) ([]Registry, error) {
+	return c.fetchRegistries(ctx)
 }
 
 func (c *aquaClient) FindRegistryByPrefix(ctx context.Context, containerRegistry string) (string, error) {
@@ -298,11 +346,31 @@ func (c *aquaClient) FindRegistryByPrefix(ctx context.Context, containerRegistry
 		return c.config.Registry, nil
 	}
 
+	// First try with cached registries
 	registries, err := c.GetRegistries(ctx)
 	if err != nil {
 		return "", fmt.Errorf("getting registries: %w", err)
 	}
 
+	if name := c.findRegistryInList(containerRegistry, registries); name != "" {
+		return name, nil
+	}
+
+	// Not found in cache - refresh cache and try again in case it's stale
+	registries, err = c.refreshCache(ctx)
+	if err != nil {
+		return "", fmt.Errorf("refreshing registry cache: %w", err)
+	}
+
+	if name := c.findRegistryInList(containerRegistry, registries); name != "" {
+		return name, nil
+	}
+
+	return "", fmt.Errorf("no Aqua registry found for container registry %q", containerRegistry)
+}
+
+// findRegistryInList searches for a matching registry in the given list
+func (c *aquaClient) findRegistryInList(containerRegistry string, registries []Registry) string {
 	// Normalize the container registry for comparison
 	normalizedRegistry := strings.TrimPrefix(containerRegistry, "https://")
 	normalizedRegistry = strings.TrimPrefix(normalizedRegistry, "http://")
@@ -320,10 +388,10 @@ func (c *aquaClient) FindRegistryByPrefix(ctx context.Context, containerRegistry
 			if normalizedRegistry == normalizedPrefix ||
 				strings.HasPrefix(normalizedRegistry, normalizedPrefix+"/") ||
 				strings.HasPrefix(normalizedPrefix, normalizedRegistry) {
-				return reg.Name, nil
+				return reg.Name
 			}
 		}
 	}
 
-	return "", fmt.Errorf("no Aqua registry found for container registry %q", containerRegistry)
+	return ""
 }

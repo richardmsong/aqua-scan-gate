@@ -104,18 +104,51 @@ func run(ctx context.Context, cfg *Config, input io.Reader) error {
 	uniqueImages := deduplicateImages(images)
 
 	if cfg.Verbose {
-		fmt.Printf("Found %d unique images to scan\n", len(uniqueImages))
+		fmt.Printf("Found %d unique images to process\n", len(uniqueImages))
+	}
+
+	// Create image resolver for resolving tags to digests (linux/amd64)
+	resolver := imageref.NewResolver()
+
+	// Resolve digests for images that don't have them
+	var resolvedImages []imageref.ImageRef
+	var resolveErrors int
+	for _, img := range uniqueImages {
+		if img.Digest != "" {
+			// Already has a digest
+			resolvedImages = append(resolvedImages, img)
+			continue
+		}
+
+		if cfg.Verbose {
+			fmt.Printf("Resolving digest for %s (linux/amd64)...\n", img.Image)
+		}
+
+		resolved, err := resolver.ResolveImageRef(ctx, img)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: failed to resolve digest for %s: %v\n", img.Image, err)
+			resolveErrors++
+			continue
+		}
+
+		if cfg.Verbose {
+			fmt.Printf("  -> %s\n", resolved.Digest)
+		}
+		resolvedImages = append(resolvedImages, resolved)
+	}
+
+	if resolveErrors > 0 && len(resolvedImages) == 0 {
+		return fmt.Errorf("failed to resolve any images")
 	}
 
 	// Dry run mode - just print images
 	if cfg.DryRun {
 		fmt.Println("Images that would be scanned:")
-		for _, img := range uniqueImages {
-			if img.Digest != "" {
-				fmt.Printf("  - %s (digest: %s)\n", img.Image, img.Digest)
-			} else {
-				fmt.Printf("  - %s (no digest)\n", img.Image)
-			}
+		for _, img := range resolvedImages {
+			fmt.Printf("  - %s (digest: %s)\n", img.Image, img.Digest)
+		}
+		if resolveErrors > 0 {
+			fmt.Printf("\nFailed to resolve: %d images\n", resolveErrors)
 		}
 		return nil
 	}
@@ -131,40 +164,43 @@ func run(ctx context.Context, cfg *Config, input io.Reader) error {
 	// Process each image
 	var scansTriggered, alreadyScanned, errors int
 
-	for _, img := range uniqueImages {
+	for _, img := range resolvedImages {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
 
-		if img.Digest == "" {
-			if cfg.Verbose {
-				fmt.Printf("Skipping %s: no digest available\n", img.Image)
-			}
-			continue
-		}
-
 		// Check if already scanned
+		if cfg.Verbose {
+			fmt.Printf("Checking scan status for %s (%s)...\n", img.Image, img.Digest)
+		}
 		result, err := client.GetScanResult(ctx, img.Image, img.Digest)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to check scan status for %s: %v\n", img.Image, err)
+			fmt.Fprintf(os.Stderr, "Error: failed to check scan status for %s: %v\n", img.Image, err)
 			errors++
 			continue
 		}
 
+		if cfg.Verbose {
+			fmt.Printf("  Scan status: %s\n", result.Status)
+		}
+
 		if result.Status == aqua.StatusFound {
 			if cfg.Verbose {
-				fmt.Printf("Already scanned: %s\n", img.Image)
+				fmt.Printf("  -> Already scanned, skipping\n")
 			}
 			alreadyScanned++
 			continue
 		}
 
 		// Trigger scan
+		if cfg.Verbose {
+			fmt.Printf("  -> Not found, triggering scan...\n")
+		}
 		scanID, err := client.TriggerScan(ctx, img.Image, img.Digest)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to trigger scan for %s: %v\n", img.Image, err)
+			fmt.Fprintf(os.Stderr, "Error: failed to trigger scan for %s: %v\n", img.Image, err)
 			errors++
 			continue
 		}
@@ -177,8 +213,16 @@ func run(ctx context.Context, cfg *Config, input io.Reader) error {
 	fmt.Printf("\nSummary:\n")
 	fmt.Printf("  Scans triggered: %d\n", scansTriggered)
 	fmt.Printf("  Already scanned: %d\n", alreadyScanned)
+	if resolveErrors > 0 {
+		fmt.Printf("  Failed to resolve: %d\n", resolveErrors)
+	}
 	if errors > 0 {
-		fmt.Printf("  Errors: %d\n", errors)
+		fmt.Printf("  Scan errors: %d\n", errors)
+	}
+
+	totalErrors := resolveErrors + errors
+	if totalErrors > 0 {
+		return fmt.Errorf("%d images failed", totalErrors)
 	}
 
 	return nil

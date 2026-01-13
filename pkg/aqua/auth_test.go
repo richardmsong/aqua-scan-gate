@@ -257,3 +257,61 @@ var _ = Describe("NewClient with Auth", func() {
 		Expect(client).NotTo(BeNil())
 	})
 })
+
+var _ = Describe("TokenManager with AuthURL", func() {
+	It("should use AuthURL for token requests when provided", func() {
+		// Set up mock auth server (simulating regional endpoint)
+		authServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			Expect(r.Method).To(Equal("POST"))
+			Expect(r.URL.Path).To(Equal("/v2/tokens"))
+
+			resp := tokenResponse{
+				Status: 200,
+				Code:   0,
+				Data:   "token-from-auth-server",
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(resp)
+		}))
+		defer authServer.Close()
+
+		// Use a different baseURL to verify it's not being used for auth
+		tm := NewTokenManager("https://api.aquasec.com", AuthConfig{
+			APIKey:     "my-api-key",
+			HMACSecret: "my-secret",
+			AuthURL:    authServer.URL, // This should be used
+		}, &http.Client{}, false)
+
+		token, err := tm.GetToken(context.Background())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(token).To(Equal("token-from-auth-server"))
+	})
+
+	It("should fall back to baseURL when AuthURL is not provided", func() {
+		// Set up mock server acting as baseURL
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			Expect(r.Method).To(Equal("POST"))
+			Expect(r.URL.Path).To(Equal("/v2/tokens"))
+
+			resp := tokenResponse{
+				Status: 200,
+				Code:   0,
+				Data:   "token-from-base-url",
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(resp)
+		}))
+		defer server.Close()
+
+		// No AuthURL provided, should use baseURL
+		tm := NewTokenManager(server.URL, AuthConfig{
+			APIKey:     "my-api-key",
+			HMACSecret: "my-secret",
+			// AuthURL not set
+		}, &http.Client{}, false)
+
+		token, err := tm.GetToken(context.Background())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(token).To(Equal("token-from-base-url"))
+	})
+})

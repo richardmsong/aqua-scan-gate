@@ -23,6 +23,15 @@ type AuthConfig struct {
 	// HMACSecret is used for HMAC256 request signing
 	HMACSecret string
 
+	// AuthURL is the regional authentication endpoint URL
+	// Regional endpoints:
+	//   - US: https://api.cloudsploit.com
+	//   - EU: https://eu-1.api.cloudsploit.com
+	//   - Singapore: https://asia-1.api.cloudsploit.com
+	//   - Sydney: https://ap-2.api.cloudsploit.com
+	// If empty, falls back to baseURL (not recommended for production)
+	AuthURL string
+
 	// TokenValidity is the token validity in minutes (default: 240)
 	TokenValidity int
 }
@@ -42,7 +51,7 @@ type tokenRequest struct {
 
 // TokenManager handles token acquisition and request signing
 type TokenManager struct {
-	baseURL    string
+	authURL    string
 	config     AuthConfig
 	httpClient *http.Client
 	verbose    bool
@@ -54,12 +63,19 @@ type TokenManager struct {
 }
 
 // NewTokenManager creates a new token manager
+// authURL should be the regional authentication endpoint (e.g., https://api.cloudsploit.com)
+// If authURL is empty, it falls back to baseURL (not recommended for production)
 func NewTokenManager(baseURL string, config AuthConfig, httpClient *http.Client, verbose bool) *TokenManager {
 	if config.TokenValidity == 0 {
 		config.TokenValidity = 240 // Default 240 minutes
 	}
+	// Use AuthURL if provided, otherwise fall back to baseURL
+	authURL := config.AuthURL
+	if authURL == "" {
+		authURL = baseURL
+	}
 	return &TokenManager{
-		baseURL:    baseURL,
+		authURL:    authURL,
 		config:     config,
 		httpClient: httpClient,
 		verbose:    verbose,
@@ -106,8 +122,8 @@ func (tm *TokenManager) fetchToken(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("marshaling token request: %w", err)
 	}
 
-	// Build the request
-	url := tm.baseURL + "/v2/tokens"
+	// Build the request using the auth URL (regional endpoint)
+	url := tm.authURL + "/v2/tokens"
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return "", fmt.Errorf("creating token request: %w", err)

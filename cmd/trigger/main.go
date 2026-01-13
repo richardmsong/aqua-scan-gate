@@ -32,6 +32,7 @@ var (
 // Config holds the CLI configuration
 type Config struct {
 	AquaURL        string
+	AquaAuthURL    string
 	AquaAPIKey     string
 	AquaHMACSecret string
 	AquaRegistry   string
@@ -45,6 +46,7 @@ func main() {
 
 	// Parse flags
 	flag.StringVar(&cfg.AquaURL, "aqua-url", os.Getenv("AQUA_URL"), "Aqua server URL (or AQUA_URL env var)")
+	flag.StringVar(&cfg.AquaAuthURL, "aqua-auth-url", os.Getenv("AQUA_AUTH_URL"), "Aqua regional auth URL (or AQUA_AUTH_URL env var, e.g., https://api.cloudsploit.com for US)")
 	flag.StringVar(&cfg.AquaAPIKey, "aqua-api-key", os.Getenv("AQUA_API_KEY"), "Aqua API key (or AQUA_API_KEY env var)")
 	flag.StringVar(&cfg.AquaHMACSecret, "aqua-hmac-secret", os.Getenv("AQUA_HMAC_SECRET"), "Aqua HMAC secret for request signing (or AQUA_HMAC_SECRET env var)")
 	flag.StringVar(&cfg.AquaRegistry, "aqua-registry", os.Getenv("AQUA_REGISTRY"), "Aqua registry name (or AQUA_REGISTRY env var)")
@@ -165,6 +167,7 @@ func run(ctx context.Context, cfg *Config, input io.Reader) error {
 		Auth: aqua.AuthConfig{
 			APIKey:     cfg.AquaAPIKey,
 			HMACSecret: cfg.AquaHMACSecret,
+			AuthURL:    cfg.AquaAuthURL,
 		},
 	})
 

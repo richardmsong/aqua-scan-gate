@@ -37,6 +37,7 @@ func main() {
 		probeAddr            string
 		enableLeaderElection bool
 		aquaURL              string
+		aquaAuthURL          string
 		aquaAPIKey           string
 		aquaHMACSecret       string
 		excludedNamespaces   string
@@ -48,6 +49,7 @@ func main() {
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false, "Enable leader election.")
 	flag.StringVar(&aquaURL, "aqua-url", os.Getenv("AQUA_URL"), "Aqua server URL")
+	flag.StringVar(&aquaAuthURL, "aqua-auth-url", os.Getenv("AQUA_AUTH_URL"), "Aqua regional auth URL (e.g., https://api.cloudsploit.com for US)")
 	flag.StringVar(&aquaAPIKey, "aqua-api-key", os.Getenv("AQUA_API_KEY"), "Aqua API key for authentication")
 	flag.StringVar(&aquaHMACSecret, "aqua-hmac-secret", os.Getenv("AQUA_HMAC_SECRET"), "HMAC secret for request signing (optional)")
 	flag.StringVar(&excludedNamespaces, "excluded-namespaces", "kube-system,kube-public,cert-manager", "Comma-separated namespaces to exclude")
@@ -75,6 +77,7 @@ func main() {
 		Auth: aqua.AuthConfig{
 			APIKey:     aquaAPIKey,
 			HMACSecret: aquaHMACSecret,
+			AuthURL:    aquaAuthURL,
 		},
 		Timeout: 30 * time.Second,
 	})

@@ -2,11 +2,8 @@ apiVersion: scans.aquasec.community/v1alpha1
 kind: ImageScan
 metadata:
   labels:
-    app.kubernetes.io/name: imagescan
-    app.kubernetes.io/instance: imagescan-sample
-    app.kubernetes.io/part-of: aqua-scan-triggerer
+    app.kubernetes.io/name: aqua-scan-triggerer
     app.kubernetes.io/managed-by: kustomize
-    app.kubernetes.io/created-by: aqua-scan-triggerer
   name: imagescan-sample
 spec:
   image: nginx:latest

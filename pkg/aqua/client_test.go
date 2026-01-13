@@ -319,7 +319,7 @@ var _ = Describe("NewClient", func() {
 			BaseURL:  "https://api.aquasec.com",
 			APIKey:   "test-key",
 			Registry: "test-registry",
-			Timeout:  60,
+			Timeout:  60 * time.Second,
 		})
 
 		Expect(client).NotTo(BeNil())

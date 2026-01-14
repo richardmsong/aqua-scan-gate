@@ -54,26 +54,30 @@ type Config struct {
 }
 
 func main() {
-	// Configure viper
+	// Configure viper with AQUA prefix for automatic env var binding
+	// This means flags like "aqua-url" will automatically bind to AQUA_AQUA_URL
+	// We use explicit BindEnv only for OTEL standardized env vars
+	viper.SetEnvPrefix("AQUA")
 	viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
 	viper.AutomaticEnv()
 
 	// Define flags using pflag
-	pflag.String("aqua-url", "", "Aqua server URL")
-	pflag.String("aqua-auth-url", "", "Aqua regional auth URL (e.g., https://api.cloudsploit.com for US)")
-	pflag.String("aqua-api-key", "", "Aqua API key")
-	pflag.String("aqua-hmac-secret", "", "Aqua HMAC secret for request signing")
-	pflag.String("aqua-registry", "", "Aqua registry name")
-	pflag.String("registry-mirrors", "", "Registry mirror mappings for airgapped environments. Format: 'source1=mirror1,source2=mirror2'. Example: 'docker.io=artifactory.internal.com/docker-remote'")
-	pflag.Duration("timeout", 30*time.Second, "Timeout for API calls")
-	pflag.Bool("dry-run", false, "Print images that would be scanned without triggering scans")
-	pflag.Bool("verbose", false, "Enable verbose output")
+	pflag.String("url", "", "Aqua server URL (env: AQUA_URL)")
+	pflag.String("auth-url", "", "Aqua regional auth URL (env: AQUA_AUTH_URL)")
+	pflag.String("api-key", "", "Aqua API key (env: AQUA_API_KEY)")
+	pflag.String("hmac-secret", "", "Aqua HMAC secret for request signing (env: AQUA_HMAC_SECRET)")
+	pflag.String("registry", "", "Aqua registry name (env: AQUA_REGISTRY)")
+	pflag.String("registry-mirrors", "", "Registry mirror mappings (env: AQUA_REGISTRY_MIRRORS)")
+	pflag.Duration("timeout", 30*time.Second, "Timeout for API calls (env: AQUA_TIMEOUT)")
+	pflag.Bool("dry-run", false, "Print images without triggering scans (env: AQUA_DRY_RUN)")
+	pflag.Bool("verbose", false, "Enable verbose output (env: AQUA_VERBOSE)")
 
 	// Tracing flags - tracing is enabled when endpoint is provided
-	pflag.String("tracing-endpoint", "", "OTLP collector endpoint - enables tracing when set")
-	pflag.String("tracing-protocol", "grpc", "OTLP protocol: grpc or http")
-	pflag.Float64("tracing-sample-ratio", 1.0, "Trace sampling ratio 0.0-1.0")
-	pflag.Bool("tracing-insecure", true, "Disable TLS for tracing exporter")
+	// These use explicit BindEnv to support OTEL standardized env var names
+	pflag.String("tracing-endpoint", "", "OTLP collector endpoint (env: OTEL_EXPORTER_OTLP_ENDPOINT)")
+	pflag.String("tracing-protocol", "grpc", "OTLP protocol: grpc or http (env: OTEL_EXPORTER_OTLP_PROTOCOL)")
+	pflag.Float64("tracing-sample-ratio", 1.0, "Trace sampling ratio 0.0-1.0 (env: OTEL_TRACES_SAMPLER_ARG)")
+	pflag.Bool("tracing-insecure", true, "Disable TLS for tracing (env: OTEL_EXPORTER_OTLP_INSECURE)")
 
 	showVersion := pflag.Bool("version", false, "Print version and exit")
 	pflag.Parse()
@@ -84,13 +88,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Bind environment variables for configuration
-	_ = viper.BindEnv("aqua-url", "AQUA_URL")
-	_ = viper.BindEnv("aqua-auth-url", "AQUA_AUTH_URL")
-	_ = viper.BindEnv("aqua-api-key", "AQUA_API_KEY")
-	_ = viper.BindEnv("aqua-hmac-secret", "AQUA_HMAC_SECRET")
-	_ = viper.BindEnv("aqua-registry", "AQUA_REGISTRY")
-	_ = viper.BindEnv("registry-mirrors", "REGISTRY_MIRRORS")
+	// Bind OTEL standardized environment variables explicitly
+	// (these don't follow the AQUA_ prefix convention)
 	_ = viper.BindEnv("tracing-endpoint", "OTEL_EXPORTER_OTLP_ENDPOINT")
 	_ = viper.BindEnv("tracing-protocol", "OTEL_EXPORTER_OTLP_PROTOCOL")
 	_ = viper.BindEnv("tracing-sample-ratio", "OTEL_TRACES_SAMPLER_ARG")
@@ -103,11 +102,11 @@ func main() {
 
 	// Get configuration values from viper (handles flag + env var precedence)
 	cfg := &Config{
-		AquaURL:            viper.GetString("aqua-url"),
-		AquaAuthURL:        viper.GetString("aqua-auth-url"),
-		AquaAPIKey:         viper.GetString("aqua-api-key"),
-		AquaHMACSecret:     viper.GetString("aqua-hmac-secret"),
-		AquaRegistry:       viper.GetString("aqua-registry"),
+		AquaURL:            viper.GetString("url"),
+		AquaAuthURL:        viper.GetString("auth-url"),
+		AquaAPIKey:         viper.GetString("api-key"),
+		AquaHMACSecret:     viper.GetString("hmac-secret"),
+		AquaRegistry:       viper.GetString("registry"),
 		RegistryMirrors:    viper.GetString("registry-mirrors"),
 		Timeout:            viper.GetDuration("timeout"),
 		DryRun:             viper.GetBool("dry-run"),
@@ -121,11 +120,11 @@ func main() {
 	// Validate required configuration
 	if !cfg.DryRun {
 		if cfg.AquaURL == "" {
-			fmt.Fprintln(os.Stderr, "Error: --aqua-url or AQUA_URL is required")
+			fmt.Fprintln(os.Stderr, "Error: --url or AQUA_URL is required")
 			os.Exit(1)
 		}
 		if cfg.AquaAPIKey == "" {
-			fmt.Fprintln(os.Stderr, "Error: --aqua-api-key or AQUA_API_KEY is required")
+			fmt.Fprintln(os.Stderr, "Error: --api-key or AQUA_API_KEY is required")
 			os.Exit(1)
 		}
 	}

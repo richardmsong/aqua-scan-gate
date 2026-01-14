@@ -36,28 +36,32 @@ func init() {
 }
 
 func main() {
-	// Configure viper
+	// Configure viper with AQUA prefix for automatic env var binding
+	// Flags like "url" will automatically bind to AQUA_URL
+	// We use explicit BindEnv only for OTEL standardized env vars
+	viper.SetEnvPrefix("AQUA")
 	viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
 	viper.AutomaticEnv()
 
 	// Define flags using pflag
-	pflag.String("metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
-	pflag.String("health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
-	pflag.Bool("leader-elect", false, "Enable leader election.")
-	pflag.String("aqua-url", "", "Aqua server URL")
-	pflag.String("aqua-auth-url", "", "Aqua regional auth URL (e.g., https://api.cloudsploit.com for US)")
-	pflag.String("aqua-api-key", "", "Aqua API key for authentication")
-	pflag.String("aqua-hmac-secret", "", "HMAC secret for request signing (optional)")
-	pflag.String("excluded-namespaces", "kube-system,kube-public,cert-manager", "Comma-separated namespaces to exclude")
-	pflag.String("scan-namespace", "", "Namespace for ImageScan CRs (empty = same as pod)")
-	pflag.Duration("rescan-interval", 24*time.Hour, "Interval for rescanning images")
-	pflag.String("registry-mirrors", "", "Comma-separated registry mirror mappings (e.g., 'docker.io=artifactory.internal.com/docker-remote,gcr.io=artifactory.internal.com/gcr-remote')")
+	pflag.String("metrics-bind-address", ":8080", "Metrics endpoint address (env: AQUA_METRICS_BIND_ADDRESS)")
+	pflag.String("health-probe-bind-address", ":8081", "Health probe address (env: AQUA_HEALTH_PROBE_BIND_ADDRESS)")
+	pflag.Bool("leader-elect", false, "Enable leader election (env: AQUA_LEADER_ELECT)")
+	pflag.String("url", "", "Aqua server URL (env: AQUA_URL)")
+	pflag.String("auth-url", "", "Aqua regional auth URL (env: AQUA_AUTH_URL)")
+	pflag.String("api-key", "", "Aqua API key (env: AQUA_API_KEY)")
+	pflag.String("hmac-secret", "", "HMAC secret for signing (env: AQUA_HMAC_SECRET)")
+	pflag.String("excluded-namespaces", "kube-system,kube-public,cert-manager", "Namespaces to exclude (env: AQUA_EXCLUDED_NAMESPACES)")
+	pflag.String("scan-namespace", "", "Namespace for ImageScan CRs (env: AQUA_SCAN_NAMESPACE)")
+	pflag.Duration("rescan-interval", 24*time.Hour, "Rescan interval (env: AQUA_RESCAN_INTERVAL)")
+	pflag.String("registry-mirrors", "", "Registry mirror mappings (env: AQUA_REGISTRY_MIRRORS)")
 
 	// Tracing flags - tracing is enabled when endpoint is provided
-	pflag.String("tracing-endpoint", "", "OTLP collector endpoint (enables tracing when set)")
-	pflag.String("tracing-protocol", "grpc", "OTLP protocol (grpc or http)")
-	pflag.Float64("tracing-sample-ratio", 1.0, "Trace sampling ratio (0.0-1.0)")
-	pflag.Bool("tracing-insecure", true, "Use insecure connection for tracing")
+	// These use explicit BindEnv to support OTEL standardized env var names
+	pflag.String("tracing-endpoint", "", "OTLP collector endpoint (env: OTEL_EXPORTER_OTLP_ENDPOINT)")
+	pflag.String("tracing-protocol", "grpc", "OTLP protocol (env: OTEL_EXPORTER_OTLP_PROTOCOL)")
+	pflag.Float64("tracing-sample-ratio", 1.0, "Trace sampling ratio (env: OTEL_TRACES_SAMPLER_ARG)")
+	pflag.Bool("tracing-insecure", true, "Use insecure tracing (env: OTEL_EXPORTER_OTLP_INSECURE)")
 
 	// Zap logging options - bind to standard flag package, then add to pflag
 	opts := zap.Options{Development: true}
@@ -73,12 +77,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Bind environment variables for configuration
-	_ = viper.BindEnv("aqua-url", "AQUA_URL")
-	_ = viper.BindEnv("aqua-auth-url", "AQUA_AUTH_URL")
-	_ = viper.BindEnv("aqua-api-key", "AQUA_API_KEY")
-	_ = viper.BindEnv("aqua-hmac-secret", "AQUA_HMAC_SECRET")
-	_ = viper.BindEnv("registry-mirrors", "REGISTRY_MIRRORS")
+	// Bind OTEL standardized environment variables explicitly
+	// (these don't follow the AQUA_ prefix convention)
 	_ = viper.BindEnv("tracing-endpoint", "OTEL_EXPORTER_OTLP_ENDPOINT")
 	_ = viper.BindEnv("tracing-protocol", "OTEL_EXPORTER_OTLP_PROTOCOL")
 	_ = viper.BindEnv("tracing-sample-ratio", "OTEL_TRACES_SAMPLER_ARG")
@@ -90,10 +90,10 @@ func main() {
 	metricsAddr := viper.GetString("metrics-bind-address")
 	probeAddr := viper.GetString("health-probe-bind-address")
 	enableLeaderElection := viper.GetBool("leader-elect")
-	aquaURL := viper.GetString("aqua-url")
-	aquaAuthURL := viper.GetString("aqua-auth-url")
-	aquaAPIKey := viper.GetString("aqua-api-key")
-	aquaHMACSecret := viper.GetString("aqua-hmac-secret")
+	aquaURL := viper.GetString("url")
+	aquaAuthURL := viper.GetString("auth-url")
+	aquaAPIKey := viper.GetString("api-key")
+	aquaHMACSecret := viper.GetString("hmac-secret")
 	excludedNamespaces := viper.GetString("excluded-namespaces")
 	scanNamespace := viper.GetString("scan-namespace")
 	rescanInterval := viper.GetDuration("rescan-interval")

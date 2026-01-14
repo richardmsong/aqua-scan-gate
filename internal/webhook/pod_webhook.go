@@ -5,10 +5,15 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+
+	"github.com/richardmsong/aqua-scan-triggerer/pkg/tracing"
 )
 
 const (
@@ -31,21 +36,34 @@ type PodMutator struct {
 // +kubebuilder:webhook:path=/mutate-v1-pod,mutating=true,failurePolicy=fail,sideEffects=None,groups="",resources=pods,verbs=create,versions=v1,name=mpod.scans.aquasec.community,admissionReviewVersions=v1
 
 func (m *PodMutator) Handle(ctx context.Context, req admission.Request) admission.Response {
+	ctx, span := tracing.StartSpan(ctx, "PodMutator.Handle",
+		trace.WithAttributes(
+			tracing.AttrPodName.String(req.Name),
+			tracing.AttrPodNamespace.String(req.Namespace),
+			attribute.String("operation", string(req.Operation)),
+		),
+	)
+	defer span.End()
+
 	logger := log.FromContext(ctx)
 
 	pod := &corev1.Pod{}
 	if err := m.decoder.Decode(req, pod); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "Failed to decode pod")
 		return admission.Errored(http.StatusBadRequest, err)
 	}
 
 	// Skip excluded namespaces
 	if m.ExcludedNamespaces[req.Namespace] {
+		span.SetAttributes(attribute.Bool("excluded_namespace", true))
 		logger.V(1).Info("Skipping excluded namespace", "namespace", req.Namespace)
 		return admission.Allowed("excluded namespace")
 	}
 
 	// Skip if bypass annotation is set
 	if pod.Annotations != nil && pod.Annotations[AnnotationBypassScan] == "true" {
+		span.SetAttributes(attribute.Bool("bypassed", true))
 		logger.Info("Bypass annotation found, skipping gate injection", "pod", pod.Name)
 		return admission.Allowed("bypass annotation")
 	}
@@ -53,17 +71,20 @@ func (m *PodMutator) Handle(ctx context.Context, req admission.Request) admissio
 	// Skip pods that already have our gate
 	for _, gate := range pod.Spec.SchedulingGates {
 		if gate.Name == SchedulingGateName {
+			span.SetAttributes(attribute.Bool("gate_already_present", true))
 			return admission.Allowed("gate already present")
 		}
 	}
 
 	// Check if all images are excluded
 	if m.allImagesExcluded(pod) {
+		span.SetAttributes(attribute.Bool("all_images_excluded", true))
 		logger.V(1).Info("All images excluded, skipping gate injection", "pod", pod.Name)
 		return admission.Allowed("all images excluded")
 	}
 
 	// Add our scheduling gate
+	span.SetAttributes(attribute.Bool("gate_injected", true))
 	logger.Info("Adding scheduling gate", "pod", pod.Name, "namespace", req.Namespace)
 	pod.Spec.SchedulingGates = append(pod.Spec.SchedulingGates, corev1.PodSchedulingGate{
 		Name: SchedulingGateName,
@@ -77,6 +98,8 @@ func (m *PodMutator) Handle(ctx context.Context, req admission.Request) admissio
 
 	marshaledPod, err := json.Marshal(pod)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "Failed to marshal pod")
 		return admission.Errored(http.StatusInternalServerError, err)
 	}
 

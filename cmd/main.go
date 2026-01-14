@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"flag"
+	"fmt"
 	"os"
 	"strings"
 	"time"
@@ -19,6 +21,7 @@ import (
 	"github.com/richardmsong/aqua-scan-triggerer/internal/controller"
 	webhookpkg "github.com/richardmsong/aqua-scan-triggerer/internal/webhook"
 	"github.com/richardmsong/aqua-scan-triggerer/pkg/aqua"
+	"github.com/richardmsong/aqua-scan-triggerer/pkg/tracing"
 )
 
 var (
@@ -44,6 +47,12 @@ func main() {
 		scanNamespace        string
 		rescanInterval       time.Duration
 		registryMirrors      string
+		// Tracing configuration
+		tracingEnabled     bool
+		tracingEndpoint    string
+		tracingProtocol    string
+		tracingSampleRatio float64
+		tracingInsecure    bool
 	)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
@@ -58,11 +67,44 @@ func main() {
 	flag.DurationVar(&rescanInterval, "rescan-interval", 24*time.Hour, "Interval for rescanning images")
 	flag.StringVar(&registryMirrors, "registry-mirrors", os.Getenv("REGISTRY_MIRRORS"), "Comma-separated registry mirror mappings (e.g., 'docker.io=artifactory.internal.com/docker-remote,gcr.io=artifactory.internal.com/gcr-remote')")
 
+	// Tracing flags
+	flag.BoolVar(&tracingEnabled, "tracing-enabled", getEnvBool("OTEL_TRACING_ENABLED", false), "Enable OpenTelemetry tracing")
+	flag.StringVar(&tracingEndpoint, "tracing-endpoint", getEnv("OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:4317"), "OTLP collector endpoint")
+	flag.StringVar(&tracingProtocol, "tracing-protocol", getEnv("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc"), "OTLP protocol (grpc or http)")
+	flag.Float64Var(&tracingSampleRatio, "tracing-sample-ratio", getEnvFloat("OTEL_TRACES_SAMPLER_ARG", 1.0), "Trace sampling ratio (0.0-1.0)")
+	flag.BoolVar(&tracingInsecure, "tracing-insecure", getEnvBool("OTEL_EXPORTER_OTLP_INSECURE", true), "Use insecure connection for tracing")
+
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	// Initialize tracing
+	tracingCfg := tracing.Config{
+		Enabled:        tracingEnabled,
+		Endpoint:       tracingEndpoint,
+		Protocol:       tracingProtocol,
+		ServiceName:    "aqua-scan-gate-controller",
+		ServiceVersion: "0.1.0",
+		SampleRatio:    tracingSampleRatio,
+		Insecure:       tracingInsecure,
+	}
+
+	tracerProvider, err := tracing.Setup(context.Background(), tracingCfg)
+	if err != nil {
+		setupLog.Error(err, "failed to initialize tracing")
+		os.Exit(1)
+	}
+	defer func() {
+		if err := tracerProvider.Shutdown(context.Background()); err != nil {
+			setupLog.Error(err, "failed to shutdown tracer provider")
+		}
+	}()
+
+	if tracingEnabled {
+		setupLog.Info("tracing enabled", "endpoint", tracingEndpoint, "protocol", tracingProtocol, "sampleRatio", tracingSampleRatio)
+	}
 
 	// Parse excluded namespaces
 	excludedNS := make(map[string]bool)
@@ -157,4 +199,50 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+// getEnv returns the value of an environment variable or a default value
+func getEnv(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
+
+// getEnvBool returns the boolean value of an environment variable or a default value
+func getEnvBool(key string, defaultValue bool) bool {
+	if value := os.Getenv(key); value != "" {
+		return strings.ToLower(value) == "true" || value == "1"
+	}
+	return defaultValue
+}
+
+// getEnvFloat returns the float64 value of an environment variable or a default value
+func getEnvFloat(key string, defaultValue float64) float64 {
+	if value := os.Getenv(key); value != "" {
+		var f float64
+		_, err := parseFloat(value, &f)
+		if err == nil {
+			return f
+		}
+	}
+	return defaultValue
+}
+
+// parseFloat is a simple float parser
+func parseFloat(s string, f *float64) (int, error) {
+	var err error
+	*f, err = strconvParseFloat(s)
+	if err != nil {
+		return 0, err
+	}
+	return len(s), nil
+}
+
+// strconvParseFloat parses a string to float64
+func strconvParseFloat(s string) (float64, error) {
+	// Simple implementation using fmt.Sscanf
+	var f float64
+	_, err := fmt.Sscanf(s, "%f", &f)
+	return f, err
 }

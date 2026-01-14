@@ -386,3 +386,81 @@ spec:
 	// Just verify no panic
 	_ = output
 }
+
+func TestRunDryRunWithRegistryMirrors(t *testing.T) {
+	cfg := &Config{
+		DryRun:          true,
+		Verbose:         true,
+		RegistryMirrors: "docker.io=artifactory.internal.com/docker-remote",
+	}
+
+	input := `
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-pod
+spec:
+  containers:
+  - name: app
+    image: nginx@sha256:abc123def456789012345678901234567890123456789012345678901234
+`
+
+	// run() should succeed with valid registry mirrors
+	err := run(t.Context(), cfg, strings.NewReader(input))
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestRunDryRunWithInvalidRegistryMirrors(t *testing.T) {
+	cfg := &Config{
+		DryRun:          true,
+		Verbose:         false,
+		RegistryMirrors: "invalid-mirror-format",
+	}
+
+	input := `
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-pod
+spec:
+  containers:
+  - name: app
+    image: nginx@sha256:abc123def456789012345678901234567890123456789012345678901234
+`
+
+	// run() should fail with invalid registry mirrors
+	err := run(t.Context(), cfg, strings.NewReader(input))
+	if err == nil {
+		t.Errorf("expected error for invalid registry mirrors format, got nil")
+	}
+	if !strings.Contains(err.Error(), "parsing registry mirrors") {
+		t.Errorf("expected error message to contain 'parsing registry mirrors', got: %v", err)
+	}
+}
+
+func TestRunDryRunWithMultipleRegistryMirrors(t *testing.T) {
+	cfg := &Config{
+		DryRun:          true,
+		Verbose:         false,
+		RegistryMirrors: "docker.io=artifactory.internal.com/docker-remote,gcr.io=artifactory.internal.com/gcr-remote",
+	}
+
+	input := `
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-pod
+spec:
+  containers:
+  - name: app
+    image: nginx@sha256:abc123def456789012345678901234567890123456789012345678901234
+`
+
+	// run() should succeed with multiple valid registry mirrors
+	err := run(t.Context(), cfg, strings.NewReader(input))
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+}

@@ -31,14 +31,15 @@ var (
 
 // Config holds the CLI configuration
 type Config struct {
-	AquaURL        string
-	AquaAuthURL    string
-	AquaAPIKey     string
-	AquaHMACSecret string
-	AquaRegistry   string
-	Timeout        time.Duration
-	DryRun         bool
-	Verbose        bool
+	AquaURL         string
+	AquaAuthURL     string
+	AquaAPIKey      string
+	AquaHMACSecret  string
+	AquaRegistry    string
+	RegistryMirrors string
+	Timeout         time.Duration
+	DryRun          bool
+	Verbose         bool
 }
 
 func main() {
@@ -50,6 +51,7 @@ func main() {
 	flag.StringVar(&cfg.AquaAPIKey, "aqua-api-key", os.Getenv("AQUA_API_KEY"), "Aqua API key (or AQUA_API_KEY env var)")
 	flag.StringVar(&cfg.AquaHMACSecret, "aqua-hmac-secret", os.Getenv("AQUA_HMAC_SECRET"), "Aqua HMAC secret for request signing (or AQUA_HMAC_SECRET env var)")
 	flag.StringVar(&cfg.AquaRegistry, "aqua-registry", os.Getenv("AQUA_REGISTRY"), "Aqua registry name (or AQUA_REGISTRY env var)")
+	flag.StringVar(&cfg.RegistryMirrors, "registry-mirrors", os.Getenv("REGISTRY_MIRRORS"), "Registry mirror mappings for airgapped environments (or REGISTRY_MIRRORS env var). Format: 'source1=mirror1,source2=mirror2'. Example: 'docker.io=artifactory.internal.com/docker-remote'")
 	flag.DurationVar(&cfg.Timeout, "timeout", 30*time.Second, "Timeout for API calls")
 	flag.BoolVar(&cfg.DryRun, "dry-run", false, "Print images that would be scanned without triggering scans")
 	flag.BoolVar(&cfg.Verbose, "verbose", false, "Enable verbose output")
@@ -145,6 +147,22 @@ func run(ctx context.Context, cfg *Config, input io.Reader) error {
 		return fmt.Errorf("failed to resolve any images")
 	}
 
+	// Parse registry mirrors
+	var registryMirrors []aqua.RegistryMirror
+	if cfg.RegistryMirrors != "" {
+		var err error
+		registryMirrors, err = aqua.ParseRegistryMirrors(cfg.RegistryMirrors)
+		if err != nil {
+			return fmt.Errorf("parsing registry mirrors: %w", err)
+		}
+		if cfg.Verbose && len(registryMirrors) > 0 {
+			fmt.Printf("Configured registry mirrors:\n")
+			for _, m := range registryMirrors {
+				fmt.Printf("  %s -> %s\n", m.Source, m.Mirror)
+			}
+		}
+	}
+
 	// Dry run mode - just print images
 	if cfg.DryRun {
 		fmt.Println("Images that would be scanned:")
@@ -159,11 +177,12 @@ func run(ctx context.Context, cfg *Config, input io.Reader) error {
 
 	// Create Aqua client
 	client := aqua.NewClient(aqua.Config{
-		BaseURL:  cfg.AquaURL,
-		APIKey:   cfg.AquaAPIKey,
-		Registry: cfg.AquaRegistry,
-		Timeout:  cfg.Timeout,
-		Verbose:  cfg.Verbose,
+		BaseURL:         cfg.AquaURL,
+		APIKey:          cfg.AquaAPIKey,
+		Registry:        cfg.AquaRegistry,
+		RegistryMirrors: registryMirrors,
+		Timeout:         cfg.Timeout,
+		Verbose:         cfg.Verbose,
 		Auth: aqua.AuthConfig{
 			APIKey:     cfg.AquaAPIKey,
 			HMACSecret: cfg.AquaHMACSecret,

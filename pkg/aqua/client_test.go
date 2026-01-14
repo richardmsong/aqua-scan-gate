@@ -17,22 +17,6 @@ func TestAquaClient(t *testing.T) {
 	RunSpecs(t, "Aqua Client Suite")
 }
 
-// mockTokenHandler returns an HTTP handler that responds to token requests
-func mockTokenHandler(bearerToken string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v2/tokens" && r.Method == "POST" {
-			resp := tokenResponse{
-				Status: 200,
-				Code:   0,
-				Data:   bearerToken,
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(resp)
-			return
-		}
-	}
-}
-
 // createMockServerWithToken creates a test server that handles both token requests and custom handlers
 func createMockServerWithToken(bearerToken string, apiHandler http.HandlerFunc) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

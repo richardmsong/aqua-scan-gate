@@ -211,3 +211,22 @@ func ValidateHMACSignature(message, signature, secret string) bool {
 	expectedSig := computeHMAC256(message, secret)
 	return hmac.Equal([]byte(signature), []byte(expectedSig))
 }
+
+// FetchToken is a convenience function to fetch an access token using the provided configuration.
+// This is useful for CLI tools that need to output a token for debugging or scripting purposes.
+// The token can be used as a Bearer token for Aqua API requests.
+func FetchToken(ctx context.Context, config AuthConfig, verbose bool) (string, error) {
+	if config.APIKey == "" {
+		return "", fmt.Errorf("API key is required")
+	}
+	if config.HMACSecret == "" {
+		return "", fmt.Errorf("HMAC secret is required")
+	}
+
+	httpClient := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+
+	tm := NewTokenManager("", config, httpClient, verbose)
+	return tm.GetToken(ctx)
+}

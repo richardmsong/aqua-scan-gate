@@ -82,6 +82,7 @@ func main() {
 	pflag.Bool("tracing-insecure", true, "Disable TLS for tracing (env: OTEL_EXPORTER_OTLP_INSECURE)")
 
 	showVersion := pflag.Bool("version", false, "Print version and exit")
+	getToken := pflag.Bool("get-token", false, "Fetch and print an Aqua access token, then exit")
 	pflag.Parse()
 
 	// Bind pflags to viper
@@ -99,6 +100,41 @@ func main() {
 
 	if *showVersion {
 		fmt.Printf("aqua-trigger version %s\n", version)
+		os.Exit(0)
+	}
+
+	// Handle --get-token flag
+	if *getToken {
+		apiKey := viper.GetString("api-key")
+		hmacSecret := viper.GetString("hmac-secret")
+		authURL := viper.GetString("auth-url")
+		verbose := viper.GetBool("verbose")
+
+		if apiKey == "" {
+			fmt.Fprintln(os.Stderr, "Error: --api-key or AQUA_API_KEY is required for token generation")
+			os.Exit(1)
+		}
+		if hmacSecret == "" {
+			fmt.Fprintln(os.Stderr, "Error: --hmac-secret or AQUA_HMAC_SECRET is required for token generation")
+			os.Exit(1)
+		}
+
+		authConfig := aqua.AuthConfig{
+			APIKey:     apiKey,
+			HMACSecret: hmacSecret,
+			AuthURL:    authURL,
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		token, err := aqua.FetchToken(ctx, authConfig, verbose)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: failed to fetch token: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Println(token)
 		os.Exit(0)
 	}
 

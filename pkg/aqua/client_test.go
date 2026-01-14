@@ -17,6 +17,27 @@ func TestAquaClient(t *testing.T) {
 	RunSpecs(t, "Aqua Client Suite")
 }
 
+// createMockServerWithToken creates a test server that handles both token requests and custom handlers
+func createMockServerWithToken(bearerToken string, apiHandler http.HandlerFunc) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Handle token requests
+		if r.URL.Path == "/v2/tokens" && r.Method == "POST" {
+			resp := tokenResponse{
+				Status: 200,
+				Code:   0,
+				Data:   bearerToken,
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(resp)
+			return
+		}
+		// Handle other API requests
+		if apiHandler != nil {
+			apiHandler(w, r)
+		}
+	}))
+}
+
 var _ = Describe("parseImageReference", func() {
 	Context("with various image reference formats", func() {
 		It("should parse image with registry and repository", func() {
@@ -98,17 +119,20 @@ var _ = Describe("GetScanResult", func() {
 
 	Context("when image is found (scanned)", func() {
 		BeforeEach(func() {
-			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server = createMockServerWithToken("test-bearer-token", func(w http.ResponseWriter, r *http.Request) {
 				Expect(r.Method).To(Equal("GET"))
-				Expect(r.Header.Get("Authorization")).To(Equal("Bearer test-api-key"))
+				Expect(r.Header.Get("Authorization")).To(Equal("Bearer test-bearer-token"))
 				w.WriteHeader(http.StatusOK)
 				_, _ = w.Write([]byte(`{"name": "test-image"}`))
-			}))
+			})
 
 			client = NewClient(Config{
 				BaseURL:  server.URL,
-				APIKey:   "test-api-key",
 				Registry: "test-registry",
+				Auth: AuthConfig{
+					APIKey:     "test-api-key",
+					HMACSecret: "test-secret",
+				},
 			})
 		})
 
@@ -123,14 +147,19 @@ var _ = Describe("GetScanResult", func() {
 
 	Context("when image is not found (not scanned)", func() {
 		BeforeEach(func() {
-			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(http.StatusNotFound)
-			}))
+			server = createMockServerWithToken("test-bearer-token", func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/v2/tokens" {
+					w.WriteHeader(http.StatusNotFound)
+				}
+			})
 
 			client = NewClient(Config{
 				BaseURL:  server.URL,
-				APIKey:   "test-api-key",
 				Registry: "test-registry",
+				Auth: AuthConfig{
+					APIKey:     "test-api-key",
+					HMACSecret: "test-secret",
+				},
 			})
 		})
 
@@ -143,15 +172,18 @@ var _ = Describe("GetScanResult", func() {
 
 	Context("when API returns an error", func() {
 		BeforeEach(func() {
-			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server = createMockServerWithToken("test-bearer-token", func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusInternalServerError)
 				_, _ = w.Write([]byte(`{"error": "internal server error"}`))
-			}))
+			})
 
 			client = NewClient(Config{
 				BaseURL:  server.URL,
-				APIKey:   "test-api-key",
 				Registry: "test-registry",
+				Auth: AuthConfig{
+					APIKey:     "test-api-key",
+					HMACSecret: "test-secret",
+				},
 			})
 		})
 
@@ -163,17 +195,24 @@ var _ = Describe("GetScanResult", func() {
 		})
 	})
 
-	Context("when API returns 401 Unauthorized", func() {
+	Context("when token request fails", func() {
 		BeforeEach(func() {
 			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(http.StatusUnauthorized)
-				_, _ = w.Write([]byte(`{"error": "invalid token"}`))
+				if r.URL.Path == "/v2/tokens" {
+					w.WriteHeader(http.StatusUnauthorized)
+					_, _ = w.Write([]byte(`{"error": "invalid credentials"}`))
+					return
+				}
+				w.WriteHeader(http.StatusOK)
 			}))
 
 			client = NewClient(Config{
 				BaseURL:  server.URL,
-				APIKey:   "bad-api-key",
 				Registry: "test-registry",
+				Auth: AuthConfig{
+					APIKey:     "bad-api-key",
+					HMACSecret: "test-secret",
+				},
 			})
 		})
 
@@ -181,7 +220,6 @@ var _ = Describe("GetScanResult", func() {
 			_, err := client.GetScanResult(context.Background(), "nginx:latest", "sha256:abc123")
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("401"))
-			Expect(err.Error()).To(ContainSubstring("invalid token"))
 		})
 	})
 })
@@ -200,9 +238,9 @@ var _ = Describe("TriggerScan", func() {
 
 	Context("when scan is triggered successfully", func() {
 		BeforeEach(func() {
-			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server = createMockServerWithToken("test-bearer-token", func(w http.ResponseWriter, r *http.Request) {
 				Expect(r.Method).To(Equal("POST"))
-				Expect(r.Header.Get("Authorization")).To(Equal("Bearer test-api-key"))
+				Expect(r.Header.Get("Authorization")).To(Equal("Bearer test-bearer-token"))
 				Expect(r.Header.Get("Content-Type")).To(Equal("application/json"))
 
 				var reqBody triggerScanRequest
@@ -212,12 +250,15 @@ var _ = Describe("TriggerScan", func() {
 				Expect(reqBody.Image).To(ContainSubstring("@sha256:abc123"))
 
 				w.WriteHeader(http.StatusCreated)
-			}))
+			})
 
 			client = NewClient(Config{
 				BaseURL:  server.URL,
-				APIKey:   "test-api-key",
 				Registry: "test-registry",
+				Auth: AuthConfig{
+					APIKey:     "test-api-key",
+					HMACSecret: "test-secret",
+				},
 			})
 		})
 
@@ -231,15 +272,18 @@ var _ = Describe("TriggerScan", func() {
 
 	Context("when API returns 400 Bad Request", func() {
 		BeforeEach(func() {
-			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server = createMockServerWithToken("test-bearer-token", func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusBadRequest)
 				_, _ = w.Write([]byte(`{"error": "invalid image format"}`))
-			}))
+			})
 
 			client = NewClient(Config{
 				BaseURL:  server.URL,
-				APIKey:   "test-api-key",
 				Registry: "test-registry",
+				Auth: AuthConfig{
+					APIKey:     "test-api-key",
+					HMACSecret: "test-secret",
+				},
 			})
 		})
 
@@ -251,17 +295,24 @@ var _ = Describe("TriggerScan", func() {
 		})
 	})
 
-	Context("when API returns 401 Unauthorized", func() {
+	Context("when token request fails", func() {
 		BeforeEach(func() {
 			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(http.StatusUnauthorized)
-				_, _ = w.Write([]byte(`{"error": "token expired"}`))
+				if r.URL.Path == "/v2/tokens" {
+					w.WriteHeader(http.StatusUnauthorized)
+					_, _ = w.Write([]byte(`{"error": "token expired"}`))
+					return
+				}
+				w.WriteHeader(http.StatusCreated)
 			}))
 
 			client = NewClient(Config{
 				BaseURL:  server.URL,
-				APIKey:   "expired-api-key",
 				Registry: "test-registry",
+				Auth: AuthConfig{
+					APIKey:     "expired-api-key",
+					HMACSecret: "test-secret",
+				},
 			})
 		})
 
@@ -269,21 +320,23 @@ var _ = Describe("TriggerScan", func() {
 			_, err := client.TriggerScan(context.Background(), "nginx:latest", "sha256:abc123")
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("401"))
-			Expect(err.Error()).To(ContainSubstring("token expired"))
 		})
 	})
 
 	Context("when API returns 500 Internal Server Error", func() {
 		BeforeEach(func() {
-			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server = createMockServerWithToken("test-bearer-token", func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusInternalServerError)
 				_, _ = w.Write([]byte(`{"error": "database connection failed"}`))
-			}))
+			})
 
 			client = NewClient(Config{
 				BaseURL:  server.URL,
-				APIKey:   "test-api-key",
 				Registry: "test-registry",
+				Auth: AuthConfig{
+					APIKey:     "test-api-key",
+					HMACSecret: "test-secret",
+				},
 			})
 		})
 
@@ -300,8 +353,11 @@ var _ = Describe("NewClient", func() {
 	It("should set default timeout when not provided", func() {
 		client := NewClient(Config{
 			BaseURL:  "https://api.aquasec.com",
-			APIKey:   "test-key",
 			Registry: "test-registry",
+			Auth: AuthConfig{
+				APIKey:     "test-key",
+				HMACSecret: "test-secret",
+			},
 		})
 
 		// The client is created - we can't directly inspect the timeout,
@@ -312,9 +368,12 @@ var _ = Describe("NewClient", func() {
 	It("should use provided timeout", func() {
 		client := NewClient(Config{
 			BaseURL:  "https://api.aquasec.com",
-			APIKey:   "test-key",
 			Registry: "test-registry",
-			Timeout:  60 * time.Second,
+			Auth: AuthConfig{
+				APIKey:     "test-key",
+				HMACSecret: "test-secret",
+			},
+			Timeout: 60 * time.Second,
 		})
 
 		Expect(client).NotTo(BeNil())
@@ -335,10 +394,10 @@ var _ = Describe("GetRegistries", func() {
 
 	Context("when registries are fetched successfully", func() {
 		BeforeEach(func() {
-			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server = createMockServerWithToken("test-bearer-token", func(w http.ResponseWriter, r *http.Request) {
 				Expect(r.Method).To(Equal("GET"))
 				Expect(r.URL.Path).To(Equal("/api/v2/registries"))
-				Expect(r.Header.Get("Authorization")).To(Equal("Bearer test-api-key"))
+				Expect(r.Header.Get("Authorization")).To(Equal("Bearer test-bearer-token"))
 
 				resp := RegistriesResponse{
 					Count:    2,
@@ -359,11 +418,14 @@ var _ = Describe("GetRegistries", func() {
 				}
 				w.WriteHeader(http.StatusOK)
 				_ = json.NewEncoder(w).Encode(resp)
-			}))
+			})
 
 			client = NewClient(Config{
 				BaseURL: server.URL,
-				APIKey:  "test-api-key",
+				Auth: AuthConfig{
+					APIKey:     "test-api-key",
+					HMACSecret: "test-secret",
+				},
 			})
 		})
 
@@ -379,14 +441,17 @@ var _ = Describe("GetRegistries", func() {
 
 	Context("when API returns an error", func() {
 		BeforeEach(func() {
-			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server = createMockServerWithToken("test-bearer-token", func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusInternalServerError)
 				_, _ = w.Write([]byte(`{"error": "database error"}`))
-			}))
+			})
 
 			client = NewClient(Config{
 				BaseURL: server.URL,
-				APIKey:  "test-api-key",
+				Auth: AuthConfig{
+					APIKey:     "test-api-key",
+					HMACSecret: "test-secret",
+				},
 			})
 		})
 
@@ -414,8 +479,11 @@ var _ = Describe("FindRegistryByPrefix", func() {
 		BeforeEach(func() {
 			client = NewClient(Config{
 				BaseURL:  "https://api.aquasec.com",
-				APIKey:   "test-api-key",
 				Registry: "my-default-registry",
+				Auth: AuthConfig{
+					APIKey:     "test-api-key",
+					HMACSecret: "test-secret",
+				},
 			})
 		})
 
@@ -428,7 +496,7 @@ var _ = Describe("FindRegistryByPrefix", func() {
 
 	Context("when looking up registry by prefix", func() {
 		BeforeEach(func() {
-			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server = createMockServerWithToken("test-bearer-token", func(w http.ResponseWriter, r *http.Request) {
 				resp := RegistriesResponse{
 					Count:    3,
 					Page:     1,
@@ -453,11 +521,14 @@ var _ = Describe("FindRegistryByPrefix", func() {
 				}
 				w.WriteHeader(http.StatusOK)
 				_ = json.NewEncoder(w).Encode(resp)
-			}))
+			})
 
 			client = NewClient(Config{
 				BaseURL: server.URL,
-				APIKey:  "test-api-key",
+				Auth: AuthConfig{
+					APIKey:     "test-api-key",
+					HMACSecret: "test-secret",
+				},
 			})
 		})
 
@@ -494,7 +565,7 @@ var _ = Describe("FindRegistryByPrefix", func() {
 
 	Context("when prefix has protocol or trailing slash", func() {
 		BeforeEach(func() {
-			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server = createMockServerWithToken("test-bearer-token", func(w http.ResponseWriter, r *http.Request) {
 				resp := RegistriesResponse{
 					Count:    1,
 					Page:     1,
@@ -509,11 +580,14 @@ var _ = Describe("FindRegistryByPrefix", func() {
 				}
 				w.WriteHeader(http.StatusOK)
 				_ = json.NewEncoder(w).Encode(resp)
-			}))
+			})
 
 			client = NewClient(Config{
 				BaseURL: server.URL,
-				APIKey:  "test-api-key",
+				Auth: AuthConfig{
+					APIKey:     "test-api-key",
+					HMACSecret: "test-secret",
+				},
 			})
 		})
 
@@ -542,6 +616,19 @@ var _ = Describe("Registry Caching", func() {
 		BeforeEach(func() {
 			apiCalls = 0
 			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// Handle token requests
+				if r.URL.Path == "/v2/tokens" && r.Method == "POST" {
+					resp := tokenResponse{
+						Status: 200,
+						Code:   0,
+						Data:   "test-bearer-token",
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(resp)
+					return
+				}
+
+				// Count only registry API calls
 				apiCalls++
 				resp := RegistriesResponse{
 					Count:    1,
@@ -561,8 +648,11 @@ var _ = Describe("Registry Caching", func() {
 
 			client = NewClient(Config{
 				BaseURL:  server.URL,
-				APIKey:   "test-api-key",
 				CacheTTL: 1 * time.Hour,
+				Auth: AuthConfig{
+					APIKey:     "test-api-key",
+					HMACSecret: "test-secret",
+				},
 			})
 		})
 
@@ -591,6 +681,18 @@ var _ = Describe("Registry Caching", func() {
 		BeforeEach(func() {
 			apiCalls = 0
 			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// Handle token requests
+				if r.URL.Path == "/v2/tokens" && r.Method == "POST" {
+					resp := tokenResponse{
+						Status: 200,
+						Code:   0,
+						Data:   "test-bearer-token",
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(resp)
+					return
+				}
+
 				apiCalls++
 				resp := RegistriesResponse{
 					Count:    1,
@@ -611,8 +713,11 @@ var _ = Describe("Registry Caching", func() {
 			// Use a very short TTL for testing expiration
 			client = NewClient(Config{
 				BaseURL:  server.URL,
-				APIKey:   "test-api-key",
 				CacheTTL: 1 * time.Millisecond,
+				Auth: AuthConfig{
+					APIKey:     "test-api-key",
+					HMACSecret: "test-secret",
+				},
 			})
 		})
 
@@ -647,6 +752,18 @@ var _ = Describe("Registry Caching", func() {
 			}
 
 			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// Handle token requests
+				if r.URL.Path == "/v2/tokens" && r.Method == "POST" {
+					resp := tokenResponse{
+						Status: 200,
+						Code:   0,
+						Data:   "test-bearer-token",
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(resp)
+					return
+				}
+
 				apiCalls++
 				resp := RegistriesResponse{
 					Count:    len(registryList),
@@ -660,8 +777,11 @@ var _ = Describe("Registry Caching", func() {
 
 			client = NewClient(Config{
 				BaseURL:  server.URL,
-				APIKey:   "test-api-key",
 				CacheTTL: 1 * time.Hour,
+				Auth: AuthConfig{
+					APIKey:     "test-api-key",
+					HMACSecret: "test-secret",
+				},
 			})
 		})
 

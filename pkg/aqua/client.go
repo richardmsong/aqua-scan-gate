@@ -72,8 +72,12 @@ type Config struct {
 	// BaseURL is the Aqua server URL
 	BaseURL string
 
-	// APIKey for authentication
+	// APIKey for authentication (deprecated, use Auth.Token instead)
+	// Kept for backward compatibility
 	APIKey string
+
+	// Auth contains authentication configuration
+	Auth AuthConfig
 
 	// Registry is the Aqua registry name to use for scans
 	Registry string
@@ -86,6 +90,9 @@ type Config struct {
 
 	// CacheTTL is the time-to-live for cached registry data (default: 1 hour)
 	CacheTTL time.Duration
+
+	// Verbose enables debug logging for authentication
+	Verbose bool
 }
 
 // registryCache holds cached registry data with timestamp
@@ -95,8 +102,9 @@ type registryCache struct {
 }
 
 type aquaClient struct {
-	config     Config
-	httpClient *http.Client
+	config       Config
+	httpClient   *http.Client
+	tokenManager *TokenManager
 
 	// Cache for registries
 	cacheMu sync.RWMutex
@@ -112,11 +120,21 @@ func NewClient(config Config) Client {
 		config.CacheTTL = DefaultCacheTTL
 	}
 
+	httpClient := &http.Client{
+		Timeout: config.Timeout,
+	}
+
+	// Handle backward compatibility: if APIKey is set but Auth.APIKey is not configured
+	if config.APIKey != "" && config.Auth.APIKey == "" {
+		config.Auth.APIKey = config.APIKey
+	}
+
+	tokenManager := NewTokenManager(config.BaseURL, config.Auth, httpClient, config.Verbose)
+
 	return &aquaClient{
-		config: config,
-		httpClient: &http.Client{
-			Timeout: config.Timeout,
-		},
+		config:       config,
+		httpClient:   httpClient,
+		tokenManager: tokenManager,
 	}
 }
 
@@ -170,7 +188,12 @@ func (c *aquaClient) GetScanResult(ctx context.Context, image, digest string) (*
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+c.config.APIKey)
+	// Get bearer token (this will fetch via HMAC-signed request if needed)
+	token, err := c.tokenManager.GetToken(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("getting auth token: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := c.httpClient.Do(req)
@@ -251,7 +274,12 @@ func (c *aquaClient) TriggerScan(ctx context.Context, image, digest string) (str
 		return "", fmt.Errorf("creating request: %w", err)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+c.config.APIKey)
+	// Get bearer token (this will fetch via HMAC-signed request if needed)
+	token, err := c.tokenManager.GetToken(ctx)
+	if err != nil {
+		return "", fmt.Errorf("getting auth token: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
@@ -303,7 +331,12 @@ func (c *aquaClient) fetchRegistries(ctx context.Context) ([]Registry, error) {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+c.config.APIKey)
+	// Get bearer token (this will fetch via HMAC-signed request if needed)
+	token, err := c.tokenManager.GetToken(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("getting auth token: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := c.httpClient.Do(req)

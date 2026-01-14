@@ -833,3 +833,265 @@ var _ = Describe("Registry Caching", func() {
 		})
 	})
 })
+
+var _ = Describe("Registry Mirrors", func() {
+	Describe("ParseRegistryMirrors", func() {
+		It("should return nil for empty string", func() {
+			mirrors, err := ParseRegistryMirrors("")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(mirrors).To(BeNil())
+		})
+
+		It("should parse a single mirror mapping", func() {
+			mirrors, err := ParseRegistryMirrors("docker.io=artifactory.internal.com/docker-remote")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(mirrors).To(HaveLen(1))
+			Expect(mirrors[0].Source).To(Equal("docker.io"))
+			Expect(mirrors[0].Mirror).To(Equal("artifactory.internal.com/docker-remote"))
+		})
+
+		It("should parse multiple mirror mappings", func() {
+			mirrors, err := ParseRegistryMirrors("docker.io=artifactory.internal.com/docker-remote,gcr.io=artifactory.internal.com/gcr-remote")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(mirrors).To(HaveLen(2))
+			Expect(mirrors[0].Source).To(Equal("docker.io"))
+			Expect(mirrors[0].Mirror).To(Equal("artifactory.internal.com/docker-remote"))
+			Expect(mirrors[1].Source).To(Equal("gcr.io"))
+			Expect(mirrors[1].Mirror).To(Equal("artifactory.internal.com/gcr-remote"))
+		})
+
+		It("should handle whitespace around values", func() {
+			mirrors, err := ParseRegistryMirrors(" docker.io = artifactory.internal.com/docker-remote , gcr.io = mirror.local/gcr ")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(mirrors).To(HaveLen(2))
+			Expect(mirrors[0].Source).To(Equal("docker.io"))
+			Expect(mirrors[0].Mirror).To(Equal("artifactory.internal.com/docker-remote"))
+		})
+
+		It("should skip empty entries", func() {
+			mirrors, err := ParseRegistryMirrors("docker.io=mirror.local,,gcr.io=gcr-mirror.local,")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(mirrors).To(HaveLen(2))
+		})
+
+		It("should return error for invalid format without equals sign", func() {
+			_, err := ParseRegistryMirrors("docker.io-mirror.local")
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("invalid registry mirror format"))
+		})
+
+		It("should return error for empty source", func() {
+			_, err := ParseRegistryMirrors("=mirror.local")
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("source and mirror cannot be empty"))
+		})
+
+		It("should return error for empty mirror", func() {
+			_, err := ParseRegistryMirrors("docker.io=")
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("source and mirror cannot be empty"))
+		})
+	})
+
+	Describe("ApplyRegistryMirror", func() {
+		Context("with no mirrors configured", func() {
+			It("should return original values", func() {
+				registry, imageName := ApplyRegistryMirror("docker.io", "library/nginx", nil)
+				Expect(registry).To(Equal("docker.io"))
+				Expect(imageName).To(Equal("library/nginx"))
+			})
+
+			It("should return original values with empty slice", func() {
+				registry, imageName := ApplyRegistryMirror("ghcr.io", "myorg/myimage", []RegistryMirror{})
+				Expect(registry).To(Equal("ghcr.io"))
+				Expect(imageName).To(Equal("myorg/myimage"))
+			})
+		})
+
+		Context("with mirrors configured", func() {
+			var mirrors []RegistryMirror
+
+			BeforeEach(func() {
+				mirrors = []RegistryMirror{
+					{Source: "docker.io", Mirror: "artifactory.internal.com/docker-remote"},
+					{Source: "gcr.io", Mirror: "artifactory.internal.com/gcr-remote"},
+					{Source: "ghcr.io", Mirror: "mirror.local"},
+				}
+			})
+
+			It("should apply mirror for docker.io", func() {
+				registry, imageName := ApplyRegistryMirror("docker.io", "library/nginx", mirrors)
+				Expect(registry).To(Equal("artifactory.internal.com"))
+				Expect(imageName).To(Equal("docker-remote/library/nginx"))
+			})
+
+			It("should apply mirror for index.docker.io (Docker Hub alias)", func() {
+				registry, imageName := ApplyRegistryMirror("index.docker.io", "library/nginx", mirrors)
+				Expect(registry).To(Equal("artifactory.internal.com"))
+				Expect(imageName).To(Equal("docker-remote/library/nginx"))
+			})
+
+			It("should apply mirror for gcr.io", func() {
+				registry, imageName := ApplyRegistryMirror("gcr.io", "my-project/my-image", mirrors)
+				Expect(registry).To(Equal("artifactory.internal.com"))
+				Expect(imageName).To(Equal("gcr-remote/my-project/my-image"))
+			})
+
+			It("should apply mirror without path prefix for ghcr.io", func() {
+				registry, imageName := ApplyRegistryMirror("ghcr.io", "myorg/myimage", mirrors)
+				Expect(registry).To(Equal("mirror.local"))
+				Expect(imageName).To(Equal("myorg/myimage"))
+			})
+
+			It("should return original values for non-mirrored registry", func() {
+				registry, imageName := ApplyRegistryMirror("quay.io", "prometheus/prometheus", mirrors)
+				Expect(registry).To(Equal("quay.io"))
+				Expect(imageName).To(Equal("prometheus/prometheus"))
+			})
+		})
+
+		Context("with protocol and trailing slashes in mirror config", func() {
+			It("should normalize https:// prefix in source", func() {
+				mirrors := []RegistryMirror{
+					{Source: "https://docker.io/", Mirror: "mirror.local/docker"},
+				}
+				registry, imageName := ApplyRegistryMirror("docker.io", "library/nginx", mirrors)
+				Expect(registry).To(Equal("mirror.local"))
+				Expect(imageName).To(Equal("docker/library/nginx"))
+			})
+
+			It("should normalize container registry with protocol", func() {
+				mirrors := []RegistryMirror{
+					{Source: "docker.io", Mirror: "https://mirror.local/docker/"},
+				}
+				registry, imageName := ApplyRegistryMirror("https://docker.io/", "library/nginx", mirrors)
+				Expect(registry).To(Equal("mirror.local"))
+				Expect(imageName).To(Equal("docker/library/nginx"))
+			})
+		})
+	})
+
+	Describe("parseMirrorURL", func() {
+		It("should parse mirror with path prefix", func() {
+			host, prefix := parseMirrorURL("artifactory.internal.com/docker-remote")
+			Expect(host).To(Equal("artifactory.internal.com"))
+			Expect(prefix).To(Equal("docker-remote"))
+		})
+
+		It("should parse mirror with nested path prefix", func() {
+			host, prefix := parseMirrorURL("artifactory.internal.com/mirrors/docker")
+			Expect(host).To(Equal("artifactory.internal.com"))
+			Expect(prefix).To(Equal("mirrors/docker"))
+		})
+
+		It("should parse mirror without path prefix", func() {
+			host, prefix := parseMirrorURL("mirror.local")
+			Expect(host).To(Equal("mirror.local"))
+			Expect(prefix).To(Equal(""))
+		})
+
+		It("should handle protocol prefix", func() {
+			host, prefix := parseMirrorURL("https://mirror.local/docker-remote")
+			Expect(host).To(Equal("mirror.local"))
+			Expect(prefix).To(Equal("docker-remote"))
+		})
+
+		It("should handle trailing slash", func() {
+			host, prefix := parseMirrorURL("mirror.local/docker/")
+			Expect(host).To(Equal("mirror.local"))
+			Expect(prefix).To(Equal("docker"))
+		})
+	})
+
+	Describe("Integration with GetScanResult", func() {
+		var (
+			server *httptest.Server
+			client Client
+		)
+
+		AfterEach(func() {
+			if server != nil {
+				server.Close()
+			}
+		})
+
+		Context("when registry mirrors are configured", func() {
+			BeforeEach(func() {
+				server = createMockServerWithToken("test-bearer-token", func(w http.ResponseWriter, r *http.Request) {
+					// Verify the request uses the mirrored path
+					Expect(r.URL.Path).To(ContainSubstring("docker-remote"))
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(`{"name": "test-image"}`))
+				})
+
+				mirrors := []RegistryMirror{
+					{Source: "docker.io", Mirror: "artifactory.internal.com/docker-remote"},
+				}
+
+				client = NewClient(Config{
+					BaseURL:         server.URL,
+					Registry:        "test-registry",
+					RegistryMirrors: mirrors,
+					Auth: AuthConfig{
+						APIKey:     "test-api-key",
+						HMACSecret: "test-secret",
+						AuthURL:    server.URL,
+					},
+				})
+			})
+
+			It("should use mirrored image path in API request", func() {
+				result, err := client.GetScanResult(context.Background(), "nginx:latest", "sha256:abc123")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result.Status).To(Equal(StatusFound))
+			})
+		})
+	})
+
+	Describe("Integration with TriggerScan", func() {
+		var (
+			server *httptest.Server
+			client Client
+		)
+
+		AfterEach(func() {
+			if server != nil {
+				server.Close()
+			}
+		})
+
+		Context("when registry mirrors are configured", func() {
+			BeforeEach(func() {
+				server = createMockServerWithToken("test-bearer-token", func(w http.ResponseWriter, r *http.Request) {
+					// Verify the request body uses the mirrored path
+					var reqBody triggerScanRequest
+					err := json.NewDecoder(r.Body).Decode(&reqBody)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(reqBody.Image).To(ContainSubstring("docker-remote/library/nginx"))
+					w.WriteHeader(http.StatusCreated)
+				})
+
+				mirrors := []RegistryMirror{
+					{Source: "docker.io", Mirror: "artifactory.internal.com/docker-remote"},
+				}
+
+				client = NewClient(Config{
+					BaseURL:         server.URL,
+					Registry:        "test-registry",
+					RegistryMirrors: mirrors,
+					Auth: AuthConfig{
+						APIKey:     "test-api-key",
+						HMACSecret: "test-secret",
+						AuthURL:    server.URL,
+					},
+				})
+			})
+
+			It("should use mirrored image path in trigger request", func() {
+				scanID, err := client.TriggerScan(context.Background(), "nginx:latest", "sha256:abc123")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(scanID).To(ContainSubstring("test-registry"))
+			})
+		})
+	})
+})

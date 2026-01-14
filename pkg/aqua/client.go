@@ -44,6 +44,15 @@ type Registry struct {
 	DefaultPrefix string   `json:"default_prefix"`
 }
 
+// RegistryMirror represents a mapping from a source registry to a mirror
+// For example, mapping docker.io to artifactory.internal.com/docker-remote
+type RegistryMirror struct {
+	// Source is the original registry to be mirrored (e.g., "docker.io", "gcr.io")
+	Source string
+	// Mirror is the target mirror URL (e.g., "artifactory.internal.com/docker-remote")
+	Mirror string
+}
+
 // RegistriesResponse is the response from GET /api/v2/registries
 type RegistriesResponse struct {
 	Count    int        `json:"count"`
@@ -81,6 +90,10 @@ type Config struct {
 
 	// Registry is the Aqua registry name to use for scans
 	Registry string
+
+	// RegistryMirrors maps source registries to their mirrors for airgapped environments
+	// Example: docker.io -> artifactory.internal.com/docker-remote
+	RegistryMirrors []RegistryMirror
 
 	// Timeout for API calls
 	Timeout time.Duration
@@ -138,6 +151,108 @@ func NewClient(config Config) Client {
 	}
 }
 
+// ApplyRegistryMirror applies registry mirror mappings to a container registry and image name.
+// If the container registry matches a mirror source, it returns the mirrored registry and
+// adjusted image name (prepending any path prefix from the mirror URL).
+// Returns the original values if no matching mirror is found.
+func ApplyRegistryMirror(containerRegistry, imageName string, mirrors []RegistryMirror) (mirroredRegistry, adjustedImageName string) {
+	if len(mirrors) == 0 {
+		return containerRegistry, imageName
+	}
+
+	// Normalize the container registry for comparison
+	normalizedRegistry := normalizeRegistryURL(containerRegistry)
+
+	for _, mirror := range mirrors {
+		normalizedSource := normalizeRegistryURL(mirror.Source)
+
+		// Check for exact match or alias match (docker.io vs index.docker.io)
+		if normalizedRegistry == normalizedSource ||
+			(isDockerHubAlias(normalizedRegistry) && isDockerHubAlias(normalizedSource)) {
+			// Parse the mirror URL to extract the host and any path prefix
+			mirrorHost, mirrorPathPrefix := parseMirrorURL(mirror.Mirror)
+
+			// Adjust the image name by prepending the mirror path prefix
+			if mirrorPathPrefix != "" {
+				adjustedImageName = mirrorPathPrefix + "/" + imageName
+			} else {
+				adjustedImageName = imageName
+			}
+
+			return mirrorHost, adjustedImageName
+		}
+	}
+
+	return containerRegistry, imageName
+}
+
+// normalizeRegistryURL normalizes a registry URL by removing protocol and trailing slashes
+func normalizeRegistryURL(url string) string {
+	url = strings.TrimPrefix(url, "https://")
+	url = strings.TrimPrefix(url, "http://")
+	url = strings.TrimSuffix(url, "/")
+	return url
+}
+
+// isDockerHubAlias returns true if the registry is a Docker Hub alias
+func isDockerHubAlias(registry string) bool {
+	return registry == "docker.io" || registry == "index.docker.io"
+}
+
+// parseMirrorURL splits a mirror URL into host and path prefix.
+// For example, "artifactory.internal.com/docker-remote" returns
+// ("artifactory.internal.com", "docker-remote")
+func parseMirrorURL(mirrorURL string) (host, pathPrefix string) {
+	mirrorURL = normalizeRegistryURL(mirrorURL)
+
+	// Find the first slash to separate host from path prefix
+	slashIdx := strings.Index(mirrorURL, "/")
+	if slashIdx == -1 {
+		// No path prefix, just the host
+		return mirrorURL, ""
+	}
+
+	return mirrorURL[:slashIdx], mirrorURL[slashIdx+1:]
+}
+
+// ParseRegistryMirrors parses a comma-separated string of registry mirror mappings
+// Format: "source1=mirror1,source2=mirror2"
+// Example: "docker.io=artifactory.internal.com/docker-remote,gcr.io=artifactory.internal.com/gcr-remote"
+func ParseRegistryMirrors(mirrorsStr string) ([]RegistryMirror, error) {
+	if mirrorsStr == "" {
+		return nil, nil
+	}
+
+	var mirrors []RegistryMirror
+	pairs := strings.Split(mirrorsStr, ",")
+
+	for _, pair := range pairs {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+
+		parts := strings.SplitN(pair, "=", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid registry mirror format %q: expected 'source=mirror'", pair)
+		}
+
+		source := strings.TrimSpace(parts[0])
+		mirror := strings.TrimSpace(parts[1])
+
+		if source == "" || mirror == "" {
+			return nil, fmt.Errorf("invalid registry mirror %q: source and mirror cannot be empty", pair)
+		}
+
+		mirrors = append(mirrors, RegistryMirror{
+			Source: source,
+			Mirror: mirror,
+		})
+	}
+
+	return mirrors, nil
+}
+
 // parseImageReference extracts container registry and image parts from a full image reference
 // using go-containerregistry/pkg/name for proper parsing.
 // Example: "richardmsong/jfrog-token-exchanger" with digest "sha256:abc123..."
@@ -170,6 +285,9 @@ func (c *aquaClient) GetScanResult(ctx context.Context, image, digest string) (*
 	if err != nil {
 		return nil, err
 	}
+
+	// Apply registry mirrors if configured (for airgapped environments)
+	containerRegistry, imageName = ApplyRegistryMirror(containerRegistry, imageName, c.config.RegistryMirrors)
 
 	// Look up the Aqua registry name from the container registry
 	aquaRegistry, err := c.FindRegistryByPrefix(ctx, containerRegistry)
@@ -242,6 +360,9 @@ func (c *aquaClient) TriggerScan(ctx context.Context, image, digest string) (str
 	if err != nil {
 		return "", err
 	}
+
+	// Apply registry mirrors if configured (for airgapped environments)
+	containerRegistry, imageName = ApplyRegistryMirror(containerRegistry, imageName, c.config.RegistryMirrors)
 
 	// Look up the Aqua registry name from the container registry
 	aquaRegistry, err := c.FindRegistryByPrefix(ctx, containerRegistry)

@@ -108,14 +108,7 @@ func main() {
 		Endpoint:       tracingEndpoint,
 		Protocol:       tracingProtocol,
 		ServiceName:    "aqua-scan-gate-controller",
-	tracingCfg := tracing.Config{
-		Endpoint:       tracingEndpoint,
-		Protocol:       tracingProtocol,
-		ServiceName:    "aqua-scan-gate-controller",
-		ServiceVersion: version, // Add var version = "dev" with ldflags override
-		SampleRatio:    tracingSampleRatio,
-		Insecure:       tracingInsecure,
-	}
+		ServiceVersion: "0.1.0",
 		SampleRatio:    tracingSampleRatio,
 		Insecure:       tracingInsecure,
 	}

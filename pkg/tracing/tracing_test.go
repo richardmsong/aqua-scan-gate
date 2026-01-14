@@ -198,9 +198,10 @@ func TestAttributeKeys(t *testing.T) {
 		{"scan.phase", AttrScanPhase.String("Passed")},
 		{"aqua.registry", AttrAquaRegistry.String("docker.io")},
 		{"aqua.endpoint", AttrAquaEndpoint.String("https://api.aqua.com")},
-		{"http.method", AttrHTTPMethod.String("GET")},
-		{"http.url", AttrHTTPURL.String("https://example.com/api")},
-		{"http.status_code", AttrHTTPStatusCode.Int(200)},
+		// HTTP attributes use OpenTelemetry semantic conventions
+		{"http.request.method", AttrHTTPMethod.String("GET")},
+		{"url.full", AttrHTTPURL.String("https://example.com/api")},
+		{"http.response.status_code", AttrHTTPStatusCode.Int(200)},
 	}
 
 	for _, tt := range tests {

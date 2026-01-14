@@ -126,12 +126,7 @@ func (r *PodGateReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			),
 		)
 		// Use imageCtx for operations within this loop iteration to maintain span hierarchy
-		imageCtx, imageSpan := tracing.StartSpan(ctx, "CheckImageScan",
-			trace.WithAttributes(
-				tracing.AttrImageName.String(img.Image),
-				tracing.AttrImageDigest.String(img.Digest),
-			),
-		)
+		_ = imageCtx // Available for use by API calls to maintain trace hierarchy
 
 		scanName := imageref.ScanName(img)
 		scanNamespace := r.ScanNamespace

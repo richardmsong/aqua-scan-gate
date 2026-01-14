@@ -4,6 +4,7 @@ package tracing
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -24,9 +25,9 @@ const (
 
 // Config holds the tracing configuration
 type Config struct {
-	// Endpoint is the OTLP collector endpoint
+	// Endpoint is the OTLP collector endpoint (host:port format)
 	// For gRPC: "localhost:4317"
-	// For HTTP: "http://localhost:4318/v1/traces"
+	// For HTTP: "localhost:4318" (path /v1/traces is added automatically)
 	// If empty, tracing is disabled
 	Endpoint string
 
@@ -119,8 +120,13 @@ func Setup(ctx context.Context, cfg Config) (*TracerProvider, error) {
 		return nil, fmt.Errorf("creating OTLP exporter: %w", err)
 	}
 
-	// Create sampler
+	// Create sampler with warning for out-of-range values
 	var sampler sdktrace.Sampler
+	if cfg.SampleRatio < 0.0 || cfg.SampleRatio > 1.0 {
+		slog.Warn("tracing sample ratio outside valid range [0.0, 1.0], clamping value",
+			"configured", cfg.SampleRatio,
+			"clamped", clampSampleRatio(cfg.SampleRatio))
+	}
 	if cfg.SampleRatio >= 1.0 {
 		sampler = sdktrace.AlwaysSample()
 	} else if cfg.SampleRatio <= 0.0 {
@@ -178,6 +184,17 @@ func SpanFromContext(ctx context.Context) trace.Span {
 	return trace.SpanFromContext(ctx)
 }
 
+// clampSampleRatio returns the clamped sample ratio value for logging purposes
+func clampSampleRatio(ratio float64) float64 {
+	if ratio < 0.0 {
+		return 0.0
+	}
+	if ratio > 1.0 {
+		return 1.0
+	}
+	return ratio
+}
+
 // Common attribute keys for tracing
 var (
 	// ImageAttributes
@@ -197,8 +214,8 @@ var (
 	AttrAquaRegistry = attribute.Key("aqua.registry")
 	AttrAquaEndpoint = attribute.Key("aqua.endpoint")
 
-	// HTTP attributes
-	AttrHTTPMethod     = attribute.Key("http.method")
-	AttrHTTPURL        = attribute.Key("http.url")
-	AttrHTTPStatusCode = attribute.Key("http.status_code")
+	// HTTP attributes - using OpenTelemetry semantic conventions for interoperability
+	AttrHTTPMethod     = semconv.HTTPRequestMethodKey
+	AttrHTTPURL        = semconv.URLFullKey
+	AttrHTTPStatusCode = semconv.HTTPResponseStatusCodeKey
 )

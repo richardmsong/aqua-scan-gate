@@ -6,7 +6,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -15,6 +14,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/spf13/pflag"
+	"github.com/spf13/viper"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -22,6 +26,7 @@ import (
 
 	"github.com/richardmsong/aqua-scan-triggerer/pkg/aqua"
 	"github.com/richardmsong/aqua-scan-triggerer/pkg/imageref"
+	"github.com/richardmsong/aqua-scan-triggerer/pkg/tracing"
 )
 
 // version information (set via ldflags during build)
@@ -40,37 +45,86 @@ type Config struct {
 	Timeout         time.Duration
 	DryRun          bool
 	Verbose         bool
+
+	// Tracing configuration
+	TracingEndpoint    string
+	TracingProtocol    string
+	TracingSampleRatio float64
+	TracingInsecure    bool
 }
 
 func main() {
-	cfg := &Config{}
+	// Configure viper with AQUA prefix for automatic env var binding
+	// This means flags like "aqua-url" will automatically bind to AQUA_AQUA_URL
+	// We use explicit BindEnv only for OTEL standardized env vars
+	viper.SetEnvPrefix("AQUA")
+	viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
+	viper.AutomaticEnv()
 
-	// Parse flags
-	flag.StringVar(&cfg.AquaURL, "aqua-url", os.Getenv("AQUA_URL"), "Aqua server URL (or AQUA_URL env var)")
-	flag.StringVar(&cfg.AquaAuthURL, "aqua-auth-url", os.Getenv("AQUA_AUTH_URL"), "Aqua regional auth URL (or AQUA_AUTH_URL env var, e.g., https://api.cloudsploit.com for US)")
-	flag.StringVar(&cfg.AquaAPIKey, "aqua-api-key", os.Getenv("AQUA_API_KEY"), "Aqua API key (or AQUA_API_KEY env var)")
-	flag.StringVar(&cfg.AquaHMACSecret, "aqua-hmac-secret", os.Getenv("AQUA_HMAC_SECRET"), "Aqua HMAC secret for request signing (or AQUA_HMAC_SECRET env var)")
-	flag.StringVar(&cfg.AquaRegistry, "aqua-registry", os.Getenv("AQUA_REGISTRY"), "Aqua registry name (or AQUA_REGISTRY env var)")
-	flag.StringVar(&cfg.RegistryMirrors, "registry-mirrors", os.Getenv("REGISTRY_MIRRORS"), "Registry mirror mappings for airgapped environments (or REGISTRY_MIRRORS env var). Format: 'source1=mirror1,source2=mirror2'. Example: 'docker.io=artifactory.internal.com/docker-remote'")
-	flag.DurationVar(&cfg.Timeout, "timeout", 30*time.Second, "Timeout for API calls")
-	flag.BoolVar(&cfg.DryRun, "dry-run", false, "Print images that would be scanned without triggering scans")
-	flag.BoolVar(&cfg.Verbose, "verbose", false, "Enable verbose output")
-	showVersion := flag.Bool("version", false, "Print version and exit")
-	flag.Parse()
+	// Define flags using pflag
+	pflag.String("url", "", "Aqua server URL (env: AQUA_URL)")
+	pflag.String("auth-url", "", "Aqua regional auth URL (env: AQUA_AUTH_URL)")
+	pflag.String("api-key", "", "Aqua API key (env: AQUA_API_KEY)")
+	pflag.String("hmac-secret", "", "Aqua HMAC secret for request signing (env: AQUA_HMAC_SECRET)")
+	pflag.String("registry", "", "Aqua registry name (env: AQUA_REGISTRY)")
+	pflag.String("registry-mirrors", "", "Registry mirror mappings (env: AQUA_REGISTRY_MIRRORS)")
+	pflag.Duration("timeout", 30*time.Second, "Timeout for API calls (env: AQUA_TIMEOUT)")
+	pflag.Bool("dry-run", false, "Print images without triggering scans (env: AQUA_DRY_RUN)")
+	pflag.Bool("verbose", false, "Enable verbose output (env: AQUA_VERBOSE)")
+
+	// Tracing flags - tracing is enabled when endpoint is provided
+	// These use explicit BindEnv to support OTEL standardized env var names
+	pflag.String("tracing-endpoint", "", "OTLP collector endpoint (env: OTEL_EXPORTER_OTLP_ENDPOINT)")
+	pflag.String("tracing-protocol", "grpc", "OTLP protocol: grpc or http (env: OTEL_EXPORTER_OTLP_PROTOCOL)")
+	pflag.Float64("tracing-sample-ratio", 1.0, "Trace sampling ratio 0.0-1.0 (env: OTEL_TRACES_SAMPLER_ARG)")
+	pflag.Bool("tracing-insecure", true, "Disable TLS for tracing (env: OTEL_EXPORTER_OTLP_INSECURE)")
+
+	showVersion := pflag.Bool("version", false, "Print version and exit")
+	pflag.Parse()
+
+	// Bind pflags to viper
+	if err := viper.BindPFlags(pflag.CommandLine); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: failed to bind pflags to viper: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Bind OTEL standardized environment variables explicitly
+	// (these don't follow the AQUA_ prefix convention)
+	_ = viper.BindEnv("tracing-endpoint", "OTEL_EXPORTER_OTLP_ENDPOINT")
+	_ = viper.BindEnv("tracing-protocol", "OTEL_EXPORTER_OTLP_PROTOCOL")
+	_ = viper.BindEnv("tracing-sample-ratio", "OTEL_TRACES_SAMPLER_ARG")
+	_ = viper.BindEnv("tracing-insecure", "OTEL_EXPORTER_OTLP_INSECURE")
 
 	if *showVersion {
 		fmt.Printf("aqua-trigger version %s\n", version)
 		os.Exit(0)
 	}
 
+	// Get configuration values from viper (handles flag + env var precedence)
+	cfg := &Config{
+		AquaURL:            viper.GetString("url"),
+		AquaAuthURL:        viper.GetString("auth-url"),
+		AquaAPIKey:         viper.GetString("api-key"),
+		AquaHMACSecret:     viper.GetString("hmac-secret"),
+		AquaRegistry:       viper.GetString("registry"),
+		RegistryMirrors:    viper.GetString("registry-mirrors"),
+		Timeout:            viper.GetDuration("timeout"),
+		DryRun:             viper.GetBool("dry-run"),
+		Verbose:            viper.GetBool("verbose"),
+		TracingEndpoint:    viper.GetString("tracing-endpoint"),
+		TracingProtocol:    viper.GetString("tracing-protocol"),
+		TracingSampleRatio: viper.GetFloat64("tracing-sample-ratio"),
+		TracingInsecure:    viper.GetBool("tracing-insecure"),
+	}
+
 	// Validate required configuration
 	if !cfg.DryRun {
 		if cfg.AquaURL == "" {
-			fmt.Fprintln(os.Stderr, "Error: --aqua-url or AQUA_URL is required")
+			fmt.Fprintln(os.Stderr, "Error: --url or AQUA_URL is required")
 			os.Exit(1)
 		}
 		if cfg.AquaAPIKey == "" {
-			fmt.Fprintln(os.Stderr, "Error: --aqua-api-key or AQUA_API_KEY is required")
+			fmt.Fprintln(os.Stderr, "Error: --api-key or AQUA_API_KEY is required")
 			os.Exit(1)
 		}
 	}
@@ -87,6 +141,28 @@ func main() {
 		cancel()
 	}()
 
+	// Set up tracing - enabled when endpoint is provided
+	tracingCfg := tracing.Config{
+		Endpoint:       cfg.TracingEndpoint,
+		Protocol:       cfg.TracingProtocol,
+		ServiceName:    "aqua-trigger",
+		ServiceVersion: version,
+		SampleRatio:    cfg.TracingSampleRatio,
+		Insecure:       cfg.TracingInsecure,
+	}
+	tp, err := tracing.Setup(ctx, tracingCfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: failed to setup tracing: %v\n", err)
+		os.Exit(1)
+	}
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if err := tp.Shutdown(shutdownCtx); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to shutdown tracer: %v\n", err)
+		}
+	}()
+
 	// Run the CLI
 	if err := run(ctx, cfg, os.Stdin); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -95,19 +171,32 @@ func main() {
 }
 
 func run(ctx context.Context, cfg *Config, input io.Reader) error {
+	// Start the main span
+	ctx, span := tracing.StartSpan(ctx, "aqua-trigger.run",
+		trace.WithAttributes(
+			attribute.Bool("dry_run", cfg.DryRun),
+			attribute.Bool("verbose", cfg.Verbose),
+		),
+	)
+	defer span.End()
+
 	// Extract images from stdin
-	images, err := extractImagesFromManifests(input, cfg.Verbose)
+	images, err := extractImagesFromManifests(ctx, input, cfg.Verbose)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to parse manifests")
 		return fmt.Errorf("parsing manifests: %w", err)
 	}
 
 	if len(images) == 0 {
 		fmt.Println("No container images found in manifests")
+		span.SetAttributes(attribute.Int("images.count", 0))
 		return nil
 	}
 
 	// Deduplicate images
 	uniqueImages := deduplicateImages(images)
+	span.SetAttributes(attribute.Int("images.unique_count", len(uniqueImages)))
 
 	if cfg.Verbose {
 		fmt.Printf("Found %d unique images to process\n", len(uniqueImages))
@@ -126,16 +215,29 @@ func run(ctx context.Context, cfg *Config, input io.Reader) error {
 			continue
 		}
 
+		// Start span for digest resolution
+		resolveCtx, resolveSpan := tracing.StartSpan(ctx, "aqua-trigger.resolve_digest",
+			trace.WithAttributes(
+				tracing.AttrImageName.String(img.Image),
+			),
+		)
+
 		if cfg.Verbose {
 			fmt.Printf("Resolving digest for %s (linux/amd64)...\n", img.Image)
 		}
 
-		resolved, err := resolver.ResolveImageRef(ctx, img)
+		resolved, err := resolver.ResolveImageRef(resolveCtx, img)
 		if err != nil {
+			resolveSpan.RecordError(err)
+			resolveSpan.SetStatus(codes.Error, "failed to resolve digest")
+			resolveSpan.End()
 			fmt.Fprintf(os.Stderr, "Error: failed to resolve digest for %s: %v\n", img.Image, err)
 			resolveErrors++
 			continue
 		}
+
+		resolveSpan.SetAttributes(tracing.AttrImageDigest.String(resolved.Digest))
+		resolveSpan.End()
 
 		if cfg.Verbose {
 			fmt.Printf("  -> %s\n", resolved.Digest)
@@ -143,7 +245,13 @@ func run(ctx context.Context, cfg *Config, input io.Reader) error {
 		resolvedImages = append(resolvedImages, resolved)
 	}
 
+	span.SetAttributes(
+		attribute.Int("images.resolved_count", len(resolvedImages)),
+		attribute.Int("images.resolve_errors", resolveErrors),
+	)
+
 	if resolveErrors > 0 && len(resolvedImages) == 0 {
+		span.SetStatus(codes.Error, "failed to resolve any images")
 		return fmt.Errorf("failed to resolve any images")
 	}
 
@@ -191,7 +299,7 @@ func run(ctx context.Context, cfg *Config, input io.Reader) error {
 	})
 
 	// Process each image
-	var scansTriggered, alreadyScanned, errors int
+	var scansTriggered, alreadyScanned, scanErrors int
 
 	for _, img := range resolvedImages {
 		select {
@@ -200,16 +308,29 @@ func run(ctx context.Context, cfg *Config, input io.Reader) error {
 		default:
 		}
 
+		// Start span for processing this image
+		imgCtx, imgSpan := tracing.StartSpan(ctx, "aqua-trigger.process_image",
+			trace.WithAttributes(
+				tracing.AttrImageName.String(img.Image),
+				tracing.AttrImageDigest.String(img.Digest),
+			),
+		)
+
 		// Check if already scanned
 		if cfg.Verbose {
 			fmt.Printf("Checking scan status for %s (%s)...\n", img.Image, img.Digest)
 		}
-		result, err := client.GetScanResult(ctx, img.Image, img.Digest)
+		result, err := client.GetScanResult(imgCtx, img.Image, img.Digest)
 		if err != nil {
+			imgSpan.RecordError(err)
+			imgSpan.SetStatus(codes.Error, "failed to check scan status")
+			imgSpan.End()
 			fmt.Fprintf(os.Stderr, "Error: failed to check scan status for %s: %v\n", img.Image, err)
-			errors++
+			scanErrors++
 			continue
 		}
+
+		imgSpan.SetAttributes(tracing.AttrScanStatus.String(string(result.Status)))
 
 		if cfg.Verbose {
 			fmt.Printf("  Scan status: %s\n", result.Status)
@@ -219,6 +340,8 @@ func run(ctx context.Context, cfg *Config, input io.Reader) error {
 			if cfg.Verbose {
 				fmt.Printf("  -> Already scanned, skipping\n")
 			}
+			imgSpan.SetAttributes(attribute.Bool("scan.already_scanned", true))
+			imgSpan.End()
 			alreadyScanned++
 			continue
 		}
@@ -227,16 +350,33 @@ func run(ctx context.Context, cfg *Config, input io.Reader) error {
 		if cfg.Verbose {
 			fmt.Printf("  -> Not found, triggering scan...\n")
 		}
-		scanID, err := client.TriggerScan(ctx, img.Image, img.Digest)
+		scanID, err := client.TriggerScan(imgCtx, img.Image, img.Digest)
 		if err != nil {
+			imgSpan.RecordError(err)
+			imgSpan.SetStatus(codes.Error, "failed to trigger scan")
+			imgSpan.End()
 			fmt.Fprintf(os.Stderr, "Error: failed to trigger scan for %s: %v\n", img.Image, err)
-			errors++
+			scanErrors++
 			continue
 		}
+
+		imgSpan.SetAttributes(
+			tracing.AttrScanID.String(scanID),
+			attribute.Bool("scan.triggered", true),
+		)
+		imgSpan.End()
 
 		fmt.Printf("Triggered scan: %s (ID: %s)\n", img.Image, scanID)
 		scansTriggered++
 	}
+
+	// Set final summary attributes on main span
+	span.SetAttributes(
+		attribute.Int("summary.scans_triggered", scansTriggered),
+		attribute.Int("summary.already_scanned", alreadyScanned),
+		attribute.Int("summary.resolve_errors", resolveErrors),
+		attribute.Int("summary.scan_errors", scanErrors),
+	)
 
 	// Print summary
 	fmt.Printf("\nSummary:\n")
@@ -245,12 +385,13 @@ func run(ctx context.Context, cfg *Config, input io.Reader) error {
 	if resolveErrors > 0 {
 		fmt.Printf("  Failed to resolve: %d\n", resolveErrors)
 	}
-	if errors > 0 {
-		fmt.Printf("  Scan errors: %d\n", errors)
+	if scanErrors > 0 {
+		fmt.Printf("  Scan errors: %d\n", scanErrors)
 	}
 
-	totalErrors := resolveErrors + errors
+	totalErrors := resolveErrors + scanErrors
 	if totalErrors > 0 {
+		span.SetStatus(codes.Error, fmt.Sprintf("%d images failed", totalErrors))
 		return fmt.Errorf("%d images failed", totalErrors)
 	}
 
@@ -258,18 +399,24 @@ func run(ctx context.Context, cfg *Config, input io.Reader) error {
 }
 
 // extractImagesFromManifests reads YAML manifests from the reader and extracts all container images.
-func extractImagesFromManifests(r io.Reader, verbose bool) ([]imageref.ImageRef, error) {
+func extractImagesFromManifests(ctx context.Context, r io.Reader, verbose bool) ([]imageref.ImageRef, error) {
+	_, span := tracing.StartSpan(ctx, "aqua-trigger.extract_images")
+	defer span.End()
+
 	var allImages []imageref.ImageRef
 
 	// Use a YAML decoder that handles multi-document YAML
 	reader := yaml.NewYAMLReader(bufio.NewReader(r))
 
+	documentsProcessed := 0
 	for {
 		doc, err := reader.Read()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "failed to read YAML document")
 			return nil, fmt.Errorf("reading YAML document: %w", err)
 		}
 
@@ -278,6 +425,7 @@ func extractImagesFromManifests(r io.Reader, verbose bool) ([]imageref.ImageRef,
 			continue
 		}
 
+		documentsProcessed++
 		images, err := extractImagesFromDocument(doc, verbose)
 		if err != nil {
 			// Log warning but continue processing other documents
@@ -289,6 +437,11 @@ func extractImagesFromManifests(r io.Reader, verbose bool) ([]imageref.ImageRef,
 
 		allImages = append(allImages, images...)
 	}
+
+	span.SetAttributes(
+		attribute.Int("documents.processed", documentsProcessed),
+		attribute.Int("images.extracted", len(allImages)),
+	)
 
 	return allImages, nil
 }

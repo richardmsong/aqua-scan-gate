@@ -13,6 +13,11 @@ import (
 	"time"
 
 	"github.com/google/go-containerregistry/pkg/name"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/richardmsong/aqua-scan-triggerer/pkg/tracing"
 )
 
 // DefaultCacheTTL is the default time-to-live for cached registry data
@@ -301,12 +306,22 @@ func parseImageReference(image, digest string) (containerRegistry, imageName, ta
 }
 
 func (c *aquaClient) GetScanResult(ctx context.Context, image, digest string) (*ScanResult, error) {
+	ctx, span := tracing.StartSpan(ctx, "AquaClient.GetScanResult",
+		trace.WithAttributes(
+			tracing.AttrImageName.String(image),
+			tracing.AttrImageDigest.String(digest),
+		),
+	)
+	defer span.End()
+
 	// GET /api/v2/images/{registry}/{image}/{tag}
 	// where tag is @sha256:...
 	// If not 404, consider it scanned/passed
 
 	containerRegistry, imageName, tag, err := parseImageReference(image, digest)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "Failed to parse image reference")
 		return nil, err
 	}
 
@@ -316,23 +331,38 @@ func (c *aquaClient) GetScanResult(ctx context.Context, image, digest string) (*
 	// Look up the Aqua registry name from the container registry
 	aquaRegistry, err := c.FindRegistryByPrefix(ctx, containerRegistry)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "Failed to find Aqua registry")
 		return nil, fmt.Errorf("finding Aqua registry for %q: %w", containerRegistry, err)
 	}
+
+	span.SetAttributes(tracing.AttrAquaRegistry.String(aquaRegistry))
 
 	// Build URL using url.JoinPath for proper URL construction
 	apiURL, err := url.JoinPath(c.config.BaseURL, "api", "v2", "images", aquaRegistry, imageName, tag)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "Failed to build API URL")
 		return nil, fmt.Errorf("building API URL: %w", err)
 	}
 
+	span.SetAttributes(
+		tracing.AttrHTTPMethod.String("GET"),
+		tracing.AttrHTTPURL.String(apiURL),
+	)
+
 	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "Failed to create request")
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
 
 	// Get bearer token (this will fetch via HMAC-signed request if needed)
 	token, err := c.tokenManager.GetToken(ctx)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "Failed to get auth token")
 		return nil, fmt.Errorf("getting auth token: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -340,14 +370,19 @@ func (c *aquaClient) GetScanResult(ctx context.Context, image, digest string) (*
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "Failed to execute request")
 		return nil, fmt.Errorf("executing request: %w", err)
 	}
 	defer func() {
 		_ = resp.Body.Close()
 	}()
 
+	span.SetAttributes(tracing.AttrHTTPStatusCode.Int(resp.StatusCode))
+
 	// 404 means not scanned yet
 	if resp.StatusCode == http.StatusNotFound {
+		span.SetAttributes(tracing.AttrScanStatus.String(string(StatusNotFound)))
 		return &ScanResult{
 			Status: StatusNotFound,
 			Image:  image,
@@ -358,6 +393,7 @@ func (c *aquaClient) GetScanResult(ctx context.Context, image, digest string) (*
 	// Any other non-error response means the image has been scanned
 	// We don't care about the enforcement - Aqua enforcer handles that
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		span.SetAttributes(tracing.AttrScanStatus.String(string(StatusFound)))
 		return &ScanResult{
 			Status: StatusFound,
 			Image:  image,
@@ -367,7 +403,10 @@ func (c *aquaClient) GetScanResult(ctx context.Context, image, digest string) (*
 
 	// Read response body for error details
 	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-	return nil, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(bodyBytes))
+	err = fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(bodyBytes))
+	span.RecordError(err)
+	span.SetStatus(codes.Error, "Unexpected status code")
+	return nil, err
 }
 
 // triggerScanRequest is the request body for POST /api/v2/images
@@ -377,11 +416,21 @@ type triggerScanRequest struct {
 }
 
 func (c *aquaClient) TriggerScan(ctx context.Context, image, digest string) (string, error) {
+	ctx, span := tracing.StartSpan(ctx, "AquaClient.TriggerScan",
+		trace.WithAttributes(
+			tracing.AttrImageName.String(image),
+			tracing.AttrImageDigest.String(digest),
+		),
+	)
+	defer span.End()
+
 	// POST /api/v2/images
 	// Body: {"registry": "...", "image": "imagename@sha256:..."}
 
 	containerRegistry, imageName, _, err := parseImageReference(image, digest)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "Failed to parse image reference")
 		return "", err
 	}
 
@@ -391,8 +440,12 @@ func (c *aquaClient) TriggerScan(ctx context.Context, image, digest string) (str
 	// Look up the Aqua registry name from the container registry
 	aquaRegistry, err := c.FindRegistryByPrefix(ctx, containerRegistry)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "Failed to find Aqua registry")
 		return "", fmt.Errorf("finding Aqua registry for %q: %w", containerRegistry, err)
 	}
+
+	span.SetAttributes(tracing.AttrAquaRegistry.String(aquaRegistry))
 
 	// Build the image reference with digest for the API
 	// Format: imagename@sha256:...
@@ -405,23 +458,36 @@ func (c *aquaClient) TriggerScan(ctx context.Context, image, digest string) (str
 
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "Failed to marshal request body")
 		return "", fmt.Errorf("marshaling request body: %w", err)
 	}
 
 	// Build URL using url.JoinPath for proper URL construction
 	apiURL, err := url.JoinPath(c.config.BaseURL, "api", "v2", "images")
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "Failed to build API URL")
 		return "", fmt.Errorf("building API URL: %w", err)
 	}
 
+	span.SetAttributes(
+		tracing.AttrHTTPMethod.String("POST"),
+		tracing.AttrHTTPURL.String(apiURL),
+	)
+
 	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(bodyBytes))
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "Failed to create request")
 		return "", fmt.Errorf("creating request: %w", err)
 	}
 
 	// Get bearer token (this will fetch via HMAC-signed request if needed)
 	token, err := c.tokenManager.GetToken(ctx)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "Failed to get auth token")
 		return "", fmt.Errorf("getting auth token: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -430,29 +496,42 @@ func (c *aquaClient) TriggerScan(ctx context.Context, image, digest string) (str
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "Failed to execute request")
 		return "", fmt.Errorf("executing request: %w", err)
 	}
 	defer func() {
 		_ = resp.Body.Close()
 	}()
 
+	span.SetAttributes(tracing.AttrHTTPStatusCode.Int(resp.StatusCode))
+
 	// 201 Created is the expected response
 	if resp.StatusCode == http.StatusCreated {
 		// Return a composite ID for tracking (registry/image@digest)
-		return fmt.Sprintf("%s/%s", aquaRegistry, imageWithDigest), nil
+		scanID := fmt.Sprintf("%s/%s", aquaRegistry, imageWithDigest)
+		span.SetAttributes(tracing.AttrScanID.String(scanID))
+		return scanID, nil
 	}
 
 	// Read response body for error details
 	respBodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-	return "", fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(respBodyBytes))
+	err = fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(respBodyBytes))
+	span.RecordError(err)
+	span.SetStatus(codes.Error, "Unexpected status code")
+	return "", err
 }
 
 func (c *aquaClient) GetRegistries(ctx context.Context) ([]Registry, error) {
-	// Check in-memory cache first with read lock
+	ctx, span := tracing.StartSpan(ctx, "AquaClient.GetRegistries")
+	defer span.End()
+
+	// Check cache first with read lock
 	c.cacheMu.RLock()
 	if c.cache != nil && time.Since(c.cache.fetchedAt) < c.config.CacheTTL {
 		registries := c.cache.registries
 		c.cacheMu.RUnlock()
+		span.SetAttributes(attribute.Bool("cache_hit", true))
 		return registries, nil
 	}
 	c.cacheMu.RUnlock()
@@ -473,29 +552,43 @@ func (c *aquaClient) GetRegistries(ctx context.Context) ([]Registry, error) {
 		}
 		// File cache miss or error, continue to fetch from API
 	}
-
+  span.SetAttributes(attribute.Bool("cache_hit", false))
 	// Cache miss or expired, fetch from API
 	return c.fetchRegistries(ctx)
 }
 
 // fetchRegistries fetches registries from the API and updates the cache
 func (c *aquaClient) fetchRegistries(ctx context.Context) ([]Registry, error) {
+	ctx, span := tracing.StartSpan(ctx, "AquaClient.fetchRegistries")
+	defer span.End()
+
 	// GET /api/v2/registries
 	// Returns all configured registries in Aqua
 
 	apiURL, err := url.JoinPath(c.config.BaseURL, "api", "v2", "registries")
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "Failed to build API URL")
 		return nil, fmt.Errorf("building API URL: %w", err)
 	}
 
+	span.SetAttributes(
+		tracing.AttrHTTPMethod.String("GET"),
+		tracing.AttrHTTPURL.String(apiURL),
+	)
+
 	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "Failed to create request")
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
 
 	// Get bearer token (this will fetch via HMAC-signed request if needed)
 	token, err := c.tokenManager.GetToken(ctx)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "Failed to get auth token")
 		return nil, fmt.Errorf("getting auth token: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -503,23 +596,34 @@ func (c *aquaClient) fetchRegistries(ctx context.Context) ([]Registry, error) {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "Failed to execute request")
 		return nil, fmt.Errorf("executing request: %w", err)
 	}
 	defer func() {
 		_ = resp.Body.Close()
 	}()
 
+	span.SetAttributes(tracing.AttrHTTPStatusCode.Int(resp.StatusCode))
+
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(bodyBytes))
+		err = fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(bodyBytes))
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "Unexpected status code")
+		return nil, err
 	}
 
 	var registriesResp RegistriesResponse
 	if err := json.NewDecoder(resp.Body).Decode(&registriesResp); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "Failed to decode response")
 		return nil, fmt.Errorf("decoding response: %w", err)
 	}
 
-	// Update in-memory cache with write lock
+	span.SetAttributes(attribute.Int("registry_count", len(registriesResp.Result)))
+
+	// Update cache with write lock
 	c.cacheMu.Lock()
 	c.cache = &registryCache{
 		registries: registriesResp.Result,

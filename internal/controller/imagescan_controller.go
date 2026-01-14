@@ -4,6 +4,9 @@ import (
 	"context"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -11,6 +14,7 @@ import (
 
 	securityv1alpha1 "github.com/richardmsong/aqua-scan-triggerer/api/v1alpha1"
 	"github.com/richardmsong/aqua-scan-triggerer/pkg/aqua"
+	"github.com/richardmsong/aqua-scan-triggerer/pkg/tracing"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -45,6 +49,14 @@ type ImageScanReconciler struct {
 // +kubebuilder:rbac:groups=scans.aquasec.community,resources=imagescans/finalizers,verbs=update
 
 func (r *ImageScanReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	ctx, span := tracing.StartSpan(ctx, "ImageScanReconciler.Reconcile",
+		trace.WithAttributes(
+			attribute.String("imagescan.name", req.Name),
+			attribute.String("imagescan.namespace", req.Namespace),
+		),
+	)
+	defer span.End()
+
 	logger := log.FromContext(ctx)
 
 	var imageScan securityv1alpha1.ImageScan
@@ -52,8 +64,15 @@ func (r *ImageScanReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
+	// Add image details to span
+	span.SetAttributes(
+		tracing.AttrImageName.String(imageScan.Spec.Image),
+		tracing.AttrImageDigest.String(imageScan.Spec.Digest),
+	)
+
 	// Error state is terminal - don't attempt to reconcile
 	if imageScan.Status.Phase == securityv1alpha1.ScanPhaseError {
+		span.SetAttributes(tracing.AttrScanPhase.String(string(securityv1alpha1.ScanPhaseError)))
 		logger.Info("ImageScan in error state, not reconciling",
 			"image", imageScan.Spec.Image,
 			"message", imageScan.Status.Message)
@@ -62,6 +81,7 @@ func (r *ImageScanReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	// If already registered, no need to rescan
 	if imageScan.Status.Phase == securityv1alpha1.ScanPhaseRegistered {
+		span.SetAttributes(tracing.AttrScanPhase.String(string(securityv1alpha1.ScanPhaseRegistered)))
 		return ctrl.Result{}, nil
 	}
 
@@ -69,6 +89,8 @@ func (r *ImageScanReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// With v2 API: not 404 = image is scanned and ready
 	result, err := r.AquaClient.GetScanResult(ctx, imageScan.Spec.Image, imageScan.Spec.Digest)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "Failed to get scan result from Aqua")
 		logger.Error(err, "Failed to get scan result from Aqua")
 		imageScan.Status.Phase = securityv1alpha1.ScanPhaseError
 		imageScan.Status.Message = err.Error()
@@ -79,12 +101,16 @@ func (r *ImageScanReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{RequeueAfter: calculateBackoff(imageScan.Status.RetryCount)}, nil
 	}
 
+	span.SetAttributes(tracing.AttrScanStatus.String(string(result.Status)))
+
 	switch result.Status {
 	case aqua.StatusNotFound:
 		// Image not found in Aqua - trigger a new scan
 		logger.Info("Image not found in Aqua, triggering scan", "image", imageScan.Spec.Image, "digest", imageScan.Spec.Digest)
 		scanID, err := r.AquaClient.TriggerScan(ctx, imageScan.Spec.Image, imageScan.Spec.Digest)
 		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "Failed to trigger scan")
 			logger.Error(err, "Failed to trigger scan")
 			imageScan.Status.Phase = securityv1alpha1.ScanPhaseError
 			imageScan.Status.Message = err.Error()
@@ -94,6 +120,7 @@ func (r *ImageScanReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			}
 			return ctrl.Result{RequeueAfter: calculateBackoff(imageScan.Status.RetryCount)}, nil
 		}
+		span.SetAttributes(tracing.AttrScanID.String(scanID))
 		imageScan.Status.Phase = securityv1alpha1.ScanPhasePending
 		imageScan.Status.AquaScanID = scanID
 		imageScan.Status.Message = "Scan triggered, waiting for Aqua to process"
@@ -114,6 +141,7 @@ func (r *ImageScanReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		imageScan.Status.Message = "Image registered in Aqua"
 		imageScan.Status.RetryCount = 0 // Reset retry count on success
 
+		span.SetAttributes(tracing.AttrScanPhase.String(string(securityv1alpha1.ScanPhaseRegistered)))
 		logger.Info("Image registered in Aqua",
 			"image", imageScan.Spec.Image,
 			"digest", imageScan.Spec.Digest)

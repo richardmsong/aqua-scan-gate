@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"strings"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -20,6 +23,7 @@ import (
 
 	securityv1alpha1 "github.com/richardmsong/aqua-scan-triggerer/api/v1alpha1"
 	"github.com/richardmsong/aqua-scan-triggerer/pkg/imageref"
+	"github.com/richardmsong/aqua-scan-triggerer/pkg/tracing"
 )
 
 const (
@@ -55,10 +59,19 @@ type PodGateReconciler struct {
 // +kubebuilder:rbac:groups=scans.aquasec.community,resources=imagescans,verbs=get;list;watch;create
 
 func (r *PodGateReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	ctx, span := tracing.StartSpan(ctx, "PodGateReconciler.Reconcile",
+		trace.WithAttributes(
+			tracing.AttrPodName.String(req.Name),
+			tracing.AttrPodNamespace.String(req.Namespace),
+		),
+	)
+	defer span.End()
+
 	logger := log.FromContext(ctx)
 
 	// Skip excluded namespaces
 	if r.ExcludedNamespaces[req.Namespace] {
+		span.SetAttributes(attribute.Bool("excluded_namespace", true))
 		return ctrl.Result{}, nil
 	}
 
@@ -69,14 +82,20 @@ func (r *PodGateReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	// Skip if pod doesn't have our gate
 	if !hasSchedulingGate(&pod, SchedulingGateName) {
+		span.SetAttributes(attribute.Bool("has_scheduling_gate", false))
 		return ctrl.Result{}, nil
 	}
 
+	span.SetAttributes(attribute.Bool("has_scheduling_gate", true))
+
 	// Check for bypass annotation
 	if pod.Annotations != nil && pod.Annotations[AnnotationBypassScan] == "true" {
+		span.SetAttributes(attribute.Bool("bypassed", true))
 		logger.Info("Bypass annotation found, removing gate", "pod", pod.Name)
 		removeSchedulingGate(&pod, SchedulingGateName)
 		if err := r.Update(ctx, &pod); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "Failed to update pod")
 			return ctrl.Result{}, err
 		}
 		if r.Recorder != nil {
@@ -87,6 +106,8 @@ func (r *PodGateReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	// Extract all images from pod spec
 	images := imageref.ExtractFromPod(&pod)
+	span.SetAttributes(attribute.Int("image_count", len(images)))
+
 	if len(images) == 0 {
 		logger.Info("No images found in pod, removing gate", "pod", pod.Name)
 		removeSchedulingGate(&pod, SchedulingGateName)
@@ -98,6 +119,13 @@ func (r *PodGateReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	var pendingImages []string
 
 	for _, img := range images {
+		imageCtx, imageSpan := tracing.StartSpan(ctx, "CheckImageScan",
+			trace.WithAttributes(
+				tracing.AttrImageName.String(img.Image),
+				tracing.AttrImageDigest.String(img.Digest),
+			),
+		)
+
 		scanName := imageref.ScanName(img)
 		scanNamespace := r.ScanNamespace
 		if scanNamespace == "" {
@@ -105,13 +133,14 @@ func (r *PodGateReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 
 		var imageScan securityv1alpha1.ImageScan
-		err := r.Get(ctx, types.NamespacedName{
+		err := r.Get(imageCtx, types.NamespacedName{
 			Name:      scanName,
 			Namespace: scanNamespace,
 		}, &imageScan)
 
 		if apierrors.IsNotFound(err) {
 			// Create ImageScan CR
+			imageSpan.SetAttributes(attribute.Bool("created_new_scan", true))
 			logger.Info("Creating ImageScan", "image", img.Image, "name", scanName)
 			imageScan = securityv1alpha1.ImageScan{
 				ObjectMeta: metav1.ObjectMeta{
@@ -126,24 +155,33 @@ func (r *PodGateReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 					Digest: img.Digest,
 				},
 			}
-			if err := r.Create(ctx, &imageScan); err != nil {
+			if err := r.Create(imageCtx, &imageScan); err != nil {
 				if !apierrors.IsAlreadyExists(err) {
+					imageSpan.RecordError(err)
+					imageSpan.SetStatus(codes.Error, "Failed to create ImageScan")
 					logger.Error(err, "Failed to create ImageScan")
+					imageSpan.End()
 					return ctrl.Result{}, err
 				}
 			}
 			allPassed = false
 			pendingImages = append(pendingImages, img.Image)
+			imageSpan.End()
 			continue
 		} else if err != nil {
+			imageSpan.RecordError(err)
+			imageSpan.SetStatus(codes.Error, "Failed to get ImageScan")
 			logger.Error(err, "Failed to get ImageScan")
+			imageSpan.End()
 			return ctrl.Result{}, err
 		}
 
 		// Check scan status
+		imageSpan.SetAttributes(tracing.AttrScanPhase.String(string(imageScan.Status.Phase)))
 		switch imageScan.Status.Phase {
 		case securityv1alpha1.ScanPhaseRegistered:
 			// Good, continue checking other images
+			imageSpan.End()
 			continue
 		case securityv1alpha1.ScanPhaseError:
 			// Error occurred - don't remove gate, emit event
@@ -158,12 +196,20 @@ func (r *PodGateReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			allPassed = false
 			pendingImages = append(pendingImages, img.Image)
 		}
+		imageSpan.End()
 	}
+
+	span.SetAttributes(
+		attribute.Bool("all_passed", allPassed),
+		attribute.Int("pending_images_count", len(pendingImages)),
+	)
 
 	if allPassed {
 		logger.Info("All images passed scan, removing gate", "pod", pod.Name)
 		removeSchedulingGate(&pod, SchedulingGateName)
 		if err := r.Update(ctx, &pod); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "Failed to update pod")
 			return ctrl.Result{}, err
 		}
 		if r.Recorder != nil {

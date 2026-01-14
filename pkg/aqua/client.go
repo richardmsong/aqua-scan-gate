@@ -631,9 +631,11 @@ func (c *aquaClient) fetchRegistries(ctx context.Context) ([]Registry, error) {
 	}
 	c.cacheMu.Unlock()
 
-	// Update file cache (non-blocking, ignore errors as file cache is optional)
+	// Update file cache (non-blocking, log errors in verbose mode as file cache is optional)
 	if c.fileCache != nil {
-		_ = c.fileCache.Set(registriesResp.Result)
+		if err := c.fileCache.Set(registriesResp.Result); err != nil && c.config.Verbose {
+			fmt.Printf("Warning: failed to update file cache: %v\n", err)
+		}
 	}
 
 	return registriesResp.Result, nil

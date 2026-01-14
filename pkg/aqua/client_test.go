@@ -3,6 +3,7 @@ package aqua
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,15 +14,26 @@ import (
 	. "github.com/onsi/gomega"
 )
 
+// testCacheDir is a test-specific cache directory to avoid conflicts with other processes
+var testCacheDir string
+
 func TestAquaClient(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "Aqua Client Suite")
 }
 
 var _ = BeforeSuite(func() {
-	// Clean up default file cache directory before running tests
-	// to ensure tests start with a clean state
-	_ = os.RemoveAll(DefaultCacheDir)
+	// Use a test-specific cache directory to avoid conflicts with other tests
+	// or processes that might be using the default cache directory
+	testCacheDir = fmt.Sprintf("%s/aqua-cache-test-%d", os.TempDir(), os.Getpid())
+	_ = os.RemoveAll(testCacheDir)
+})
+
+var _ = AfterSuite(func() {
+	// Clean up test cache directory
+	if testCacheDir != "" {
+		_ = os.RemoveAll(testCacheDir)
+	}
 })
 
 // createMockServerWithToken creates a test server that handles both token requests and custom handlers

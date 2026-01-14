@@ -358,10 +358,13 @@ var _ = Describe("FileCache", func() {
 			err := fc.Set(registries)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Verify no temp file exists
-			tmpFile := fc.GetCachePath() + ".tmp"
-			_, err = os.Stat(tmpFile)
-			Expect(os.IsNotExist(err)).To(BeTrue())
+			// Verify no temp files exist in the cache directory
+			// Temp files are created with pattern "registries-*.tmp"
+			entries, err := os.ReadDir(cacheDir)
+			Expect(err).NotTo(HaveOccurred())
+			for _, entry := range entries {
+				Expect(entry.Name()).NotTo(ContainSubstring(".tmp"))
+			}
 
 			// Verify cache file is complete
 			result, err := fc.Get()

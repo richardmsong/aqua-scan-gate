@@ -50,7 +50,7 @@ type FileCacheResult struct {
 // FileCache provides file-based caching for registry data
 type FileCache struct {
 	config FileCacheConfig
-	mu     sync.Mutex
+	mu     sync.RWMutex
 }
 
 // NewFileCache creates a new file-based cache
@@ -77,7 +77,7 @@ func (fc *FileCache) cacheFilePath() string {
 
 // ensureCacheDir creates the cache directory if it doesn't exist
 func (fc *FileCache) ensureCacheDir() error {
-	return os.MkdirAll(fc.config.CacheDir, 0755)
+	return os.MkdirAll(fc.config.CacheDir, 0700)
 }
 
 // Get retrieves registries from the file cache if valid
@@ -88,8 +88,8 @@ func (fc *FileCache) Get() (*FileCacheResult, error) {
 		return nil, nil
 	}
 
-	fc.mu.Lock()
-	defer fc.mu.Unlock()
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
 
 	data, err := os.ReadFile(fc.cacheFilePath())
 	if err != nil {
@@ -141,14 +141,33 @@ func (fc *FileCache) Set(registries []Registry) error {
 	}
 
 	// Write to a temporary file first, then rename for atomicity
-	tmpFile := fc.cacheFilePath() + ".tmp"
-	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
+	// Use CreateTemp for unique temp file names to avoid race conditions with multiple instances
+	tmpFile, err := os.CreateTemp(fc.config.CacheDir, "registries-*.tmp")
+	if err != nil {
+		return fmt.Errorf("creating temporary cache file: %w", err)
+	}
+	tmpFilePath := tmpFile.Name()
+
+	// Write data and close the file
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpFilePath)
 		return fmt.Errorf("writing temporary cache file: %w", err)
 	}
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpFilePath)
+		return fmt.Errorf("closing temporary cache file: %w", err)
+	}
 
-	if err := os.Rename(tmpFile, fc.cacheFilePath()); err != nil {
+	// Set restrictive permissions on the temp file before rename
+	if err := os.Chmod(tmpFilePath, 0600); err != nil {
+		_ = os.Remove(tmpFilePath)
+		return fmt.Errorf("setting cache file permissions: %w", err)
+	}
+
+	if err := os.Rename(tmpFilePath, fc.cacheFilePath()); err != nil {
 		// Clean up temporary file on rename failure
-		_ = os.Remove(tmpFile)
+		_ = os.Remove(tmpFilePath)
 		return fmt.Errorf("renaming cache file: %w", err)
 	}
 
@@ -171,26 +190,31 @@ func (fc *FileCache) Clear() error {
 	return nil
 }
 
-// IsExpired checks if the cache has expired without loading all data
+// IsExpired checks if the cache has expired by reading the FetchedAt timestamp from the file
 func (fc *FileCache) IsExpired() (bool, error) {
 	if !fc.config.Enabled {
 		return true, nil
 	}
 
-	fc.mu.Lock()
-	defer fc.mu.Unlock()
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
 
-	info, err := os.Stat(fc.cacheFilePath())
+	data, err := os.ReadFile(fc.cacheFilePath())
 	if err != nil {
 		if os.IsNotExist(err) {
 			return true, nil // No cache file = expired
 		}
-		return true, fmt.Errorf("checking cache file: %w", err)
+		return true, fmt.Errorf("reading cache file: %w", err)
 	}
 
-	// Quick check based on file modification time
-	// Note: This is a rough check; actual expiration is based on FetchedAt in the file
-	if time.Since(info.ModTime()) > fc.config.TTL {
+	var cacheData fileCacheData
+	if err := json.Unmarshal(data, &cacheData); err != nil {
+		// Invalid cache file, treat as expired
+		return true, nil
+	}
+
+	// Check expiration based on the actual FetchedAt timestamp stored in the file
+	if time.Since(cacheData.FetchedAt) > fc.config.TTL {
 		return true, nil
 	}
 

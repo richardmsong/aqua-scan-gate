@@ -15,6 +15,9 @@ import (
 	"syscall"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -22,6 +25,7 @@ import (
 
 	"github.com/richardmsong/aqua-scan-triggerer/pkg/aqua"
 	"github.com/richardmsong/aqua-scan-triggerer/pkg/imageref"
+	"github.com/richardmsong/aqua-scan-triggerer/pkg/tracing"
 )
 
 // version information (set via ldflags during build)
@@ -40,6 +44,13 @@ type Config struct {
 	Timeout         time.Duration
 	DryRun          bool
 	Verbose         bool
+
+	// Tracing configuration
+	TracingEnabled     bool
+	TracingEndpoint    string
+	TracingProtocol    string
+	TracingSampleRatio float64
+	TracingInsecure    bool
 }
 
 func main() {
@@ -55,6 +66,14 @@ func main() {
 	flag.DurationVar(&cfg.Timeout, "timeout", 30*time.Second, "Timeout for API calls")
 	flag.BoolVar(&cfg.DryRun, "dry-run", false, "Print images that would be scanned without triggering scans")
 	flag.BoolVar(&cfg.Verbose, "verbose", false, "Enable verbose output")
+
+	// Tracing flags
+	flag.BoolVar(&cfg.TracingEnabled, "tracing-enabled", getEnvBool("OTEL_TRACING_ENABLED", false), "Enable OpenTelemetry tracing (or OTEL_TRACING_ENABLED env var)")
+	flag.StringVar(&cfg.TracingEndpoint, "tracing-endpoint", getEnvString("OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:4317"), "OTLP collector endpoint (or OTEL_EXPORTER_OTLP_ENDPOINT env var)")
+	flag.StringVar(&cfg.TracingProtocol, "tracing-protocol", getEnvString("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc"), "OTLP protocol: grpc or http (or OTEL_EXPORTER_OTLP_PROTOCOL env var)")
+	flag.Float64Var(&cfg.TracingSampleRatio, "tracing-sample-ratio", getEnvFloat64("OTEL_TRACES_SAMPLER_ARG", 1.0), "Trace sampling ratio 0.0-1.0 (or OTEL_TRACES_SAMPLER_ARG env var)")
+	flag.BoolVar(&cfg.TracingInsecure, "tracing-insecure", getEnvBool("OTEL_EXPORTER_OTLP_INSECURE", true), "Disable TLS for tracing exporter (or OTEL_EXPORTER_OTLP_INSECURE env var)")
+
 	showVersion := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
 
@@ -87,6 +106,27 @@ func main() {
 		cancel()
 	}()
 
+	// Set up tracing
+	tracingCfg := tracing.Config{
+		Enabled:        cfg.TracingEnabled,
+		Endpoint:       cfg.TracingEndpoint,
+		Protocol:       cfg.TracingProtocol,
+		ServiceName:    "aqua-trigger",
+		ServiceVersion: version,
+		SampleRatio:    cfg.TracingSampleRatio,
+		Insecure:       cfg.TracingInsecure,
+	}
+	tp, err := tracing.Setup(ctx, tracingCfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: failed to setup tracing: %v\n", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if err := tp.Shutdown(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to shutdown tracer: %v\n", err)
+		}
+	}()
+
 	// Run the CLI
 	if err := run(ctx, cfg, os.Stdin); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -95,19 +135,32 @@ func main() {
 }
 
 func run(ctx context.Context, cfg *Config, input io.Reader) error {
+	// Start the main span
+	ctx, span := tracing.StartSpan(ctx, "aqua-trigger.run",
+		trace.WithAttributes(
+			attribute.Bool("dry_run", cfg.DryRun),
+			attribute.Bool("verbose", cfg.Verbose),
+		),
+	)
+	defer span.End()
+
 	// Extract images from stdin
-	images, err := extractImagesFromManifests(input, cfg.Verbose)
+	images, err := extractImagesFromManifests(ctx, input, cfg.Verbose)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to parse manifests")
 		return fmt.Errorf("parsing manifests: %w", err)
 	}
 
 	if len(images) == 0 {
 		fmt.Println("No container images found in manifests")
+		span.SetAttributes(attribute.Int("images.count", 0))
 		return nil
 	}
 
 	// Deduplicate images
 	uniqueImages := deduplicateImages(images)
+	span.SetAttributes(attribute.Int("images.unique_count", len(uniqueImages)))
 
 	if cfg.Verbose {
 		fmt.Printf("Found %d unique images to process\n", len(uniqueImages))
@@ -126,16 +179,29 @@ func run(ctx context.Context, cfg *Config, input io.Reader) error {
 			continue
 		}
 
+		// Start span for digest resolution
+		resolveCtx, resolveSpan := tracing.StartSpan(ctx, "aqua-trigger.resolve_digest",
+			trace.WithAttributes(
+				tracing.AttrImageName.String(img.Image),
+			),
+		)
+
 		if cfg.Verbose {
 			fmt.Printf("Resolving digest for %s (linux/amd64)...\n", img.Image)
 		}
 
-		resolved, err := resolver.ResolveImageRef(ctx, img)
+		resolved, err := resolver.ResolveImageRef(resolveCtx, img)
 		if err != nil {
+			resolveSpan.RecordError(err)
+			resolveSpan.SetStatus(codes.Error, "failed to resolve digest")
+			resolveSpan.End()
 			fmt.Fprintf(os.Stderr, "Error: failed to resolve digest for %s: %v\n", img.Image, err)
 			resolveErrors++
 			continue
 		}
+
+		resolveSpan.SetAttributes(tracing.AttrImageDigest.String(resolved.Digest))
+		resolveSpan.End()
 
 		if cfg.Verbose {
 			fmt.Printf("  -> %s\n", resolved.Digest)
@@ -143,7 +209,13 @@ func run(ctx context.Context, cfg *Config, input io.Reader) error {
 		resolvedImages = append(resolvedImages, resolved)
 	}
 
+	span.SetAttributes(
+		attribute.Int("images.resolved_count", len(resolvedImages)),
+		attribute.Int("images.resolve_errors", resolveErrors),
+	)
+
 	if resolveErrors > 0 && len(resolvedImages) == 0 {
+		span.SetStatus(codes.Error, "failed to resolve any images")
 		return fmt.Errorf("failed to resolve any images")
 	}
 
@@ -191,7 +263,7 @@ func run(ctx context.Context, cfg *Config, input io.Reader) error {
 	})
 
 	// Process each image
-	var scansTriggered, alreadyScanned, errors int
+	var scansTriggered, alreadyScanned, scanErrors int
 
 	for _, img := range resolvedImages {
 		select {
@@ -200,16 +272,29 @@ func run(ctx context.Context, cfg *Config, input io.Reader) error {
 		default:
 		}
 
+		// Start span for processing this image
+		imgCtx, imgSpan := tracing.StartSpan(ctx, "aqua-trigger.process_image",
+			trace.WithAttributes(
+				tracing.AttrImageName.String(img.Image),
+				tracing.AttrImageDigest.String(img.Digest),
+			),
+		)
+
 		// Check if already scanned
 		if cfg.Verbose {
 			fmt.Printf("Checking scan status for %s (%s)...\n", img.Image, img.Digest)
 		}
-		result, err := client.GetScanResult(ctx, img.Image, img.Digest)
+		result, err := client.GetScanResult(imgCtx, img.Image, img.Digest)
 		if err != nil {
+			imgSpan.RecordError(err)
+			imgSpan.SetStatus(codes.Error, "failed to check scan status")
+			imgSpan.End()
 			fmt.Fprintf(os.Stderr, "Error: failed to check scan status for %s: %v\n", img.Image, err)
-			errors++
+			scanErrors++
 			continue
 		}
+
+		imgSpan.SetAttributes(tracing.AttrScanStatus.String(string(result.Status)))
 
 		if cfg.Verbose {
 			fmt.Printf("  Scan status: %s\n", result.Status)
@@ -219,6 +304,8 @@ func run(ctx context.Context, cfg *Config, input io.Reader) error {
 			if cfg.Verbose {
 				fmt.Printf("  -> Already scanned, skipping\n")
 			}
+			imgSpan.SetAttributes(attribute.Bool("scan.already_scanned", true))
+			imgSpan.End()
 			alreadyScanned++
 			continue
 		}
@@ -227,16 +314,33 @@ func run(ctx context.Context, cfg *Config, input io.Reader) error {
 		if cfg.Verbose {
 			fmt.Printf("  -> Not found, triggering scan...\n")
 		}
-		scanID, err := client.TriggerScan(ctx, img.Image, img.Digest)
+		scanID, err := client.TriggerScan(imgCtx, img.Image, img.Digest)
 		if err != nil {
+			imgSpan.RecordError(err)
+			imgSpan.SetStatus(codes.Error, "failed to trigger scan")
+			imgSpan.End()
 			fmt.Fprintf(os.Stderr, "Error: failed to trigger scan for %s: %v\n", img.Image, err)
-			errors++
+			scanErrors++
 			continue
 		}
+
+		imgSpan.SetAttributes(
+			tracing.AttrScanID.String(scanID),
+			attribute.Bool("scan.triggered", true),
+		)
+		imgSpan.End()
 
 		fmt.Printf("Triggered scan: %s (ID: %s)\n", img.Image, scanID)
 		scansTriggered++
 	}
+
+	// Set final summary attributes on main span
+	span.SetAttributes(
+		attribute.Int("summary.scans_triggered", scansTriggered),
+		attribute.Int("summary.already_scanned", alreadyScanned),
+		attribute.Int("summary.resolve_errors", resolveErrors),
+		attribute.Int("summary.scan_errors", scanErrors),
+	)
 
 	// Print summary
 	fmt.Printf("\nSummary:\n")
@@ -245,12 +349,13 @@ func run(ctx context.Context, cfg *Config, input io.Reader) error {
 	if resolveErrors > 0 {
 		fmt.Printf("  Failed to resolve: %d\n", resolveErrors)
 	}
-	if errors > 0 {
-		fmt.Printf("  Scan errors: %d\n", errors)
+	if scanErrors > 0 {
+		fmt.Printf("  Scan errors: %d\n", scanErrors)
 	}
 
-	totalErrors := resolveErrors + errors
+	totalErrors := resolveErrors + scanErrors
 	if totalErrors > 0 {
+		span.SetStatus(codes.Error, fmt.Sprintf("%d images failed", totalErrors))
 		return fmt.Errorf("%d images failed", totalErrors)
 	}
 
@@ -258,18 +363,24 @@ func run(ctx context.Context, cfg *Config, input io.Reader) error {
 }
 
 // extractImagesFromManifests reads YAML manifests from the reader and extracts all container images.
-func extractImagesFromManifests(r io.Reader, verbose bool) ([]imageref.ImageRef, error) {
+func extractImagesFromManifests(ctx context.Context, r io.Reader, verbose bool) ([]imageref.ImageRef, error) {
+	_, span := tracing.StartSpan(ctx, "aqua-trigger.extract_images")
+	defer span.End()
+
 	var allImages []imageref.ImageRef
 
 	// Use a YAML decoder that handles multi-document YAML
 	reader := yaml.NewYAMLReader(bufio.NewReader(r))
 
+	documentsProcessed := 0
 	for {
 		doc, err := reader.Read()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "failed to read YAML document")
 			return nil, fmt.Errorf("reading YAML document: %w", err)
 		}
 
@@ -278,6 +389,7 @@ func extractImagesFromManifests(r io.Reader, verbose bool) ([]imageref.ImageRef,
 			continue
 		}
 
+		documentsProcessed++
 		images, err := extractImagesFromDocument(doc, verbose)
 		if err != nil {
 			// Log warning but continue processing other documents
@@ -289,6 +401,11 @@ func extractImagesFromManifests(r io.Reader, verbose bool) ([]imageref.ImageRef,
 
 		allImages = append(allImages, images...)
 	}
+
+	span.SetAttributes(
+		attribute.Int("documents.processed", documentsProcessed),
+		attribute.Int("images.extracted", len(allImages)),
+	)
 
 	return allImages, nil
 }
@@ -381,4 +498,35 @@ func deduplicateImages(images []imageref.ImageRef) []imageref.ImageRef {
 	}
 
 	return result
+}
+
+// getEnvBool returns the boolean value of an environment variable, or the default value if not set.
+func getEnvBool(key string, defaultValue bool) bool {
+	val := os.Getenv(key)
+	if val == "" {
+		return defaultValue
+	}
+	return val == "true" || val == "1" || val == "yes"
+}
+
+// getEnvString returns the string value of an environment variable, or the default value if not set.
+func getEnvString(key, defaultValue string) string {
+	val := os.Getenv(key)
+	if val == "" {
+		return defaultValue
+	}
+	return val
+}
+
+// getEnvFloat64 returns the float64 value of an environment variable, or the default value if not set.
+func getEnvFloat64(key string, defaultValue float64) float64 {
+	val := os.Getenv(key)
+	if val == "" {
+		return defaultValue
+	}
+	var f float64
+	if _, err := fmt.Sscanf(val, "%f", &f); err != nil {
+		return defaultValue
+	}
+	return f
 }

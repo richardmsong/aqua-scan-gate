@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
 
@@ -223,7 +224,7 @@ spec:
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			reader := strings.NewReader(tt.input)
-			images, err := extractImagesFromManifests(reader, false)
+			images, err := extractImagesFromManifests(context.Background(), reader, false)
 
 			if tt.wantErr {
 				if err == nil {

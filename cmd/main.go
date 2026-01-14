@@ -43,6 +43,7 @@ func main() {
 		excludedNamespaces   string
 		scanNamespace        string
 		rescanInterval       time.Duration
+		registryMirrors      string
 	)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
@@ -55,6 +56,7 @@ func main() {
 	flag.StringVar(&excludedNamespaces, "excluded-namespaces", "kube-system,kube-public,cert-manager", "Comma-separated namespaces to exclude")
 	flag.StringVar(&scanNamespace, "scan-namespace", "", "Namespace for ImageScan CRs (empty = same as pod)")
 	flag.DurationVar(&rescanInterval, "rescan-interval", 24*time.Hour, "Interval for rescanning images")
+	flag.StringVar(&registryMirrors, "registry-mirrors", os.Getenv("REGISTRY_MIRRORS"), "Comma-separated registry mirror mappings (e.g., 'docker.io=artifactory.internal.com/docker-remote,gcr.io=artifactory.internal.com/gcr-remote')")
 
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
@@ -71,6 +73,19 @@ func main() {
 		}
 	}
 
+	// Parse registry mirrors
+	mirrors, err := aqua.ParseRegistryMirrors(registryMirrors)
+	if err != nil {
+		setupLog.Error(err, "failed to parse registry mirrors")
+		os.Exit(1)
+	}
+	if len(mirrors) > 0 {
+		setupLog.Info("configured registry mirrors", "count", len(mirrors))
+		for _, m := range mirrors {
+			setupLog.Info("registry mirror", "source", m.Source, "mirror", m.Mirror)
+		}
+	}
+
 	// Create Aqua client
 	aquaClient := aqua.NewClient(aqua.Config{
 		BaseURL: aquaURL,
@@ -79,7 +94,8 @@ func main() {
 			HMACSecret: aquaHMACSecret,
 			AuthURL:    aquaAuthURL,
 		},
-		Timeout: 30 * time.Second,
+		RegistryMirrors: mirrors,
+		Timeout:         30 * time.Second,
 	})
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{

@@ -2,11 +2,12 @@ package main
 
 import (
 	"context"
-	"flag"
+	goflag "flag"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -35,73 +36,72 @@ func init() {
 }
 
 func main() {
-	var (
-		metricsAddr          string
-		probeAddr            string
-		enableLeaderElection bool
-		aquaURL              string
-		aquaAuthURL          string
-		aquaAPIKey           string
-		aquaHMACSecret       string
-		excludedNamespaces   string
-		scanNamespace        string
-		rescanInterval       time.Duration
-		registryMirrors      string
-		// Tracing configuration
-		tracingEndpoint    string
-		tracingProtocol    string
-		tracingSampleRatio float64
-		tracingInsecure    bool
-	)
-
-	// Configure viper for environment variable binding
-	viper.SetEnvPrefix("")
-	viper.AutomaticEnv()
+	// Configure viper
 	viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
+	viper.AutomaticEnv()
 
-	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
-	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
-	flag.BoolVar(&enableLeaderElection, "leader-elect", false, "Enable leader election.")
-	flag.StringVar(&aquaURL, "aqua-url", os.Getenv("AQUA_URL"), "Aqua server URL")
-	flag.StringVar(&aquaAuthURL, "aqua-auth-url", os.Getenv("AQUA_AUTH_URL"), "Aqua regional auth URL (e.g., https://api.cloudsploit.com for US)")
-	flag.StringVar(&aquaAPIKey, "aqua-api-key", os.Getenv("AQUA_API_KEY"), "Aqua API key for authentication")
-	flag.StringVar(&aquaHMACSecret, "aqua-hmac-secret", os.Getenv("AQUA_HMAC_SECRET"), "HMAC secret for request signing (optional)")
-	flag.StringVar(&excludedNamespaces, "excluded-namespaces", "kube-system,kube-public,cert-manager", "Comma-separated namespaces to exclude")
-	flag.StringVar(&scanNamespace, "scan-namespace", "", "Namespace for ImageScan CRs (empty = same as pod)")
-	flag.DurationVar(&rescanInterval, "rescan-interval", 24*time.Hour, "Interval for rescanning images")
-	flag.StringVar(&registryMirrors, "registry-mirrors", os.Getenv("REGISTRY_MIRRORS"), "Comma-separated registry mirror mappings (e.g., 'docker.io=artifactory.internal.com/docker-remote,gcr.io=artifactory.internal.com/gcr-remote')")
+	// Define flags using pflag
+	pflag.String("metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
+	pflag.String("health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	pflag.Bool("leader-elect", false, "Enable leader election.")
+	pflag.String("aqua-url", "", "Aqua server URL")
+	pflag.String("aqua-auth-url", "", "Aqua regional auth URL (e.g., https://api.cloudsploit.com for US)")
+	pflag.String("aqua-api-key", "", "Aqua API key for authentication")
+	pflag.String("aqua-hmac-secret", "", "HMAC secret for request signing (optional)")
+	pflag.String("excluded-namespaces", "kube-system,kube-public,cert-manager", "Comma-separated namespaces to exclude")
+	pflag.String("scan-namespace", "", "Namespace for ImageScan CRs (empty = same as pod)")
+	pflag.Duration("rescan-interval", 24*time.Hour, "Interval for rescanning images")
+	pflag.String("registry-mirrors", "", "Comma-separated registry mirror mappings (e.g., 'docker.io=artifactory.internal.com/docker-remote,gcr.io=artifactory.internal.com/gcr-remote')")
 
 	// Tracing flags - tracing is enabled when endpoint is provided
-	flag.StringVar(&tracingEndpoint, "tracing-endpoint", "", "OTLP collector endpoint (enables tracing when set)")
-	flag.StringVar(&tracingProtocol, "tracing-protocol", "grpc", "OTLP protocol (grpc or http)")
-	flag.Float64Var(&tracingSampleRatio, "tracing-sample-ratio", 1.0, "Trace sampling ratio (0.0-1.0)")
-	flag.BoolVar(&tracingInsecure, "tracing-insecure", true, "Use insecure connection for tracing")
+	pflag.String("tracing-endpoint", "", "OTLP collector endpoint (enables tracing when set)")
+	pflag.String("tracing-protocol", "grpc", "OTLP protocol (grpc or http)")
+	pflag.Float64("tracing-sample-ratio", 1.0, "Trace sampling ratio (0.0-1.0)")
+	pflag.Bool("tracing-insecure", true, "Use insecure connection for tracing")
 
-	// Bind tracing flags to viper for environment variable support
+	// Zap logging options - bind to standard flag package, then add to pflag
+	opts := zap.Options{Development: true}
+	goFlagSet := goflag.NewFlagSet("zap", goflag.ExitOnError)
+	opts.BindFlags(goFlagSet)
+	pflag.CommandLine.AddGoFlagSet(goFlagSet)
+
+	pflag.Parse()
+
+	// Bind pflags to viper
+	if err := viper.BindPFlags(pflag.CommandLine); err != nil {
+		setupLog.Error(err, "failed to bind pflags to viper")
+		os.Exit(1)
+	}
+
+	// Bind environment variables for configuration
+	_ = viper.BindEnv("aqua-url", "AQUA_URL")
+	_ = viper.BindEnv("aqua-auth-url", "AQUA_AUTH_URL")
+	_ = viper.BindEnv("aqua-api-key", "AQUA_API_KEY")
+	_ = viper.BindEnv("aqua-hmac-secret", "AQUA_HMAC_SECRET")
+	_ = viper.BindEnv("registry-mirrors", "REGISTRY_MIRRORS")
 	_ = viper.BindEnv("tracing-endpoint", "OTEL_EXPORTER_OTLP_ENDPOINT")
 	_ = viper.BindEnv("tracing-protocol", "OTEL_EXPORTER_OTLP_PROTOCOL")
 	_ = viper.BindEnv("tracing-sample-ratio", "OTEL_TRACES_SAMPLER_ARG")
 	_ = viper.BindEnv("tracing-insecure", "OTEL_EXPORTER_OTLP_INSECURE")
 
-	opts := zap.Options{Development: true}
-	opts.BindFlags(flag.CommandLine)
-	flag.Parse()
-
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
-	// Apply viper values for tracing configuration (env vars take precedence when flag not set)
-	if tracingEndpoint == "" {
-		tracingEndpoint = viper.GetString("tracing-endpoint")
-	}
-	if tracingProtocol == "grpc" && viper.GetString("tracing-protocol") != "" {
-		tracingProtocol = viper.GetString("tracing-protocol")
-	}
-	if tracingSampleRatio == 1.0 && viper.GetFloat64("tracing-sample-ratio") != 0 {
-		tracingSampleRatio = viper.GetFloat64("tracing-sample-ratio")
-	}
-	if viper.IsSet("tracing-insecure") {
-		tracingInsecure = viper.GetBool("tracing-insecure")
-	}
+	// Get configuration values from viper (handles flag + env var precedence)
+	metricsAddr := viper.GetString("metrics-bind-address")
+	probeAddr := viper.GetString("health-probe-bind-address")
+	enableLeaderElection := viper.GetBool("leader-elect")
+	aquaURL := viper.GetString("aqua-url")
+	aquaAuthURL := viper.GetString("aqua-auth-url")
+	aquaAPIKey := viper.GetString("aqua-api-key")
+	aquaHMACSecret := viper.GetString("aqua-hmac-secret")
+	excludedNamespaces := viper.GetString("excluded-namespaces")
+	scanNamespace := viper.GetString("scan-namespace")
+	rescanInterval := viper.GetDuration("rescan-interval")
+	registryMirrors := viper.GetString("registry-mirrors")
+	tracingEndpoint := viper.GetString("tracing-endpoint")
+	tracingProtocol := viper.GetString("tracing-protocol")
+	tracingSampleRatio := viper.GetFloat64("tracing-sample-ratio")
+	tracingInsecure := viper.GetBool("tracing-insecure")
 
 	// Initialize tracing - enabled when endpoint is provided
 	tracingCfg := tracing.Config{
@@ -119,7 +119,9 @@ func main() {
 		os.Exit(1)
 	}
 	defer func() {
-		if err := tracerProvider.Shutdown(context.Background()); err != nil {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if err := tracerProvider.Shutdown(shutdownCtx); err != nil {
 			setupLog.Error(err, "failed to shutdown tracer provider")
 		}
 	}()

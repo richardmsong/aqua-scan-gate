@@ -119,12 +119,14 @@ func (r *PodGateReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	var pendingImages []string
 
 	for _, img := range images {
-		_, imageSpan := tracing.StartSpan(ctx, "CheckImageScan",
+		imageCtx, imageSpan := tracing.StartSpan(ctx, "CheckImageScan",
 			trace.WithAttributes(
 				tracing.AttrImageName.String(img.Image),
 				tracing.AttrImageDigest.String(img.Digest),
 			),
 		)
+		// Use imageCtx for operations within this loop iteration to maintain span hierarchy
+		_ = imageCtx // Currently not needed as Get/Create use the parent ctx, but available for future use
 
 		scanName := imageref.ScanName(img)
 		scanNamespace := r.ScanNamespace

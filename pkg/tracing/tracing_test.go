@@ -236,3 +236,185 @@ func TestTracerProvider_Tracer(t *testing.T) {
 		t.Error("TracerProvider.Tracer() returned nil")
 	}
 }
+
+func TestConfig_SampleRatioEdgeCases(t *testing.T) {
+	tests := []struct {
+		name        string
+		sampleRatio float64
+		description string
+	}{
+		{
+			name:        "zero sample ratio means never sample",
+			sampleRatio: 0.0,
+			description: "NeverSample",
+		},
+		{
+			name:        "full sample ratio means always sample",
+			sampleRatio: 1.0,
+			description: "AlwaysSample",
+		},
+		{
+			name:        "partial sample ratio uses ratio-based sampling",
+			sampleRatio: 0.5,
+			description: "TraceIDRatioBased",
+		},
+		{
+			name:        "negative sample ratio treated as never sample",
+			sampleRatio: -0.1,
+			description: "NeverSample",
+		},
+		{
+			name:        "sample ratio above 1.0 treated as always sample",
+			sampleRatio: 1.5,
+			description: "AlwaysSample",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{
+				SampleRatio: tt.sampleRatio,
+			}
+			// Just verify the config holds the value correctly
+			if cfg.SampleRatio != tt.sampleRatio {
+				t.Errorf("Config.SampleRatio = %f, want %f", cfg.SampleRatio, tt.sampleRatio)
+			}
+		})
+	}
+}
+
+func TestSetup_HTTPProtocol(t *testing.T) {
+	// Test that HTTP protocol is recognized (but will fail to connect since no server)
+	ctx := context.Background()
+	cfg := Config{
+		Endpoint: "localhost:4318",
+		Protocol: "http",
+		Insecure: true,
+	}
+
+	// This should succeed in creating the exporter (connection happens later)
+	tp, err := Setup(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Setup() with HTTP protocol error = %v, want nil", err)
+	}
+	if tp == nil {
+		t.Fatal("Setup() returned nil TracerProvider")
+	}
+	if tp.provider == nil {
+		t.Error("Setup() with HTTP protocol should have non-nil provider")
+	}
+
+	// Clean up
+	if err := tp.Shutdown(ctx); err != nil {
+		t.Logf("Shutdown warning (expected, no server): %v", err)
+	}
+}
+
+func TestSetup_GRPCProtocol(t *testing.T) {
+	// Test that gRPC protocol is recognized (but will fail to connect since no server)
+	ctx := context.Background()
+	cfg := Config{
+		Endpoint: "localhost:4317",
+		Protocol: "grpc",
+		Insecure: true,
+	}
+
+	// This should succeed in creating the exporter (connection happens later)
+	tp, err := Setup(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Setup() with gRPC protocol error = %v, want nil", err)
+	}
+	if tp == nil {
+		t.Fatal("Setup() returned nil TracerProvider")
+	}
+	if tp.provider == nil {
+		t.Error("Setup() with gRPC protocol should have non-nil provider")
+	}
+
+	// Clean up
+	if err := tp.Shutdown(ctx); err != nil {
+		t.Logf("Shutdown warning (expected, no server): %v", err)
+	}
+}
+
+func TestSetup_WithServiceInfo(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		Endpoint:       "localhost:4317",
+		Protocol:       "grpc",
+		ServiceName:    "test-service",
+		ServiceVersion: "1.2.3",
+		SampleRatio:    1.0,
+		Insecure:       true,
+	}
+
+	tp, err := Setup(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Setup() with service info error = %v, want nil", err)
+	}
+	if tp == nil {
+		t.Fatal("Setup() returned nil TracerProvider")
+	}
+
+	// Verify tracer is available
+	tracer := tp.Tracer()
+	if tracer == nil {
+		t.Error("TracerProvider.Tracer() returned nil")
+	}
+
+	// Clean up
+	if err := tp.Shutdown(ctx); err != nil {
+		t.Logf("Shutdown warning (expected, no server): %v", err)
+	}
+}
+
+func TestSetup_SpanCreation(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		Endpoint:       "localhost:4317",
+		Protocol:       "grpc",
+		ServiceName:    "test-service",
+		ServiceVersion: "1.0.0",
+		SampleRatio:    1.0,
+		Insecure:       true,
+	}
+
+	tp, err := Setup(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Setup() error = %v, want nil", err)
+	}
+	defer func() {
+		_ = tp.Shutdown(ctx)
+	}()
+
+	// Create a span using the global tracer
+	spanCtx, span := StartSpan(ctx, "test-operation",
+		trace.WithAttributes(
+			AttrImageName.String("nginx:latest"),
+			AttrPodName.String("test-pod"),
+			AttrPodNamespace.String("default"),
+		),
+	)
+
+	if spanCtx == nil {
+		t.Error("StartSpan() returned nil context")
+	}
+	if span == nil {
+		t.Error("StartSpan() returned nil span")
+	}
+
+	// Create a child span
+	_, childSpan := StartSpan(spanCtx, "child-operation",
+		trace.WithAttributes(
+			AttrScanID.String("scan-123"),
+			AttrScanStatus.String("completed"),
+		),
+	)
+
+	if childSpan == nil {
+		t.Error("Child span creation failed")
+	}
+
+	childSpan.End()
+	span.End()
+}

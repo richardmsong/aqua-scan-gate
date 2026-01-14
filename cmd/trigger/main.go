@@ -6,7 +6,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -15,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/spf13/pflag"
+	"github.com/spf13/viper"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -53,31 +54,68 @@ type Config struct {
 }
 
 func main() {
-	cfg := &Config{}
+	// Configure viper
+	viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
+	viper.AutomaticEnv()
 
-	// Parse flags
-	flag.StringVar(&cfg.AquaURL, "aqua-url", os.Getenv("AQUA_URL"), "Aqua server URL (or AQUA_URL env var)")
-	flag.StringVar(&cfg.AquaAuthURL, "aqua-auth-url", os.Getenv("AQUA_AUTH_URL"), "Aqua regional auth URL (or AQUA_AUTH_URL env var, e.g., https://api.cloudsploit.com for US)")
-	flag.StringVar(&cfg.AquaAPIKey, "aqua-api-key", os.Getenv("AQUA_API_KEY"), "Aqua API key (or AQUA_API_KEY env var)")
-	flag.StringVar(&cfg.AquaHMACSecret, "aqua-hmac-secret", os.Getenv("AQUA_HMAC_SECRET"), "Aqua HMAC secret for request signing (or AQUA_HMAC_SECRET env var)")
-	flag.StringVar(&cfg.AquaRegistry, "aqua-registry", os.Getenv("AQUA_REGISTRY"), "Aqua registry name (or AQUA_REGISTRY env var)")
-	flag.StringVar(&cfg.RegistryMirrors, "registry-mirrors", os.Getenv("REGISTRY_MIRRORS"), "Registry mirror mappings for airgapped environments (or REGISTRY_MIRRORS env var). Format: 'source1=mirror1,source2=mirror2'. Example: 'docker.io=artifactory.internal.com/docker-remote'")
-	flag.DurationVar(&cfg.Timeout, "timeout", 30*time.Second, "Timeout for API calls")
-	flag.BoolVar(&cfg.DryRun, "dry-run", false, "Print images that would be scanned without triggering scans")
-	flag.BoolVar(&cfg.Verbose, "verbose", false, "Enable verbose output")
+	// Define flags using pflag
+	pflag.String("aqua-url", "", "Aqua server URL")
+	pflag.String("aqua-auth-url", "", "Aqua regional auth URL (e.g., https://api.cloudsploit.com for US)")
+	pflag.String("aqua-api-key", "", "Aqua API key")
+	pflag.String("aqua-hmac-secret", "", "Aqua HMAC secret for request signing")
+	pflag.String("aqua-registry", "", "Aqua registry name")
+	pflag.String("registry-mirrors", "", "Registry mirror mappings for airgapped environments. Format: 'source1=mirror1,source2=mirror2'. Example: 'docker.io=artifactory.internal.com/docker-remote'")
+	pflag.Duration("timeout", 30*time.Second, "Timeout for API calls")
+	pflag.Bool("dry-run", false, "Print images that would be scanned without triggering scans")
+	pflag.Bool("verbose", false, "Enable verbose output")
 
 	// Tracing flags - tracing is enabled when endpoint is provided
-	flag.StringVar(&cfg.TracingEndpoint, "tracing-endpoint", getEnvString("OTEL_EXPORTER_OTLP_ENDPOINT", ""), "OTLP collector endpoint - enables tracing when set (or OTEL_EXPORTER_OTLP_ENDPOINT env var)")
-	flag.StringVar(&cfg.TracingProtocol, "tracing-protocol", getEnvString("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc"), "OTLP protocol: grpc or http (or OTEL_EXPORTER_OTLP_PROTOCOL env var)")
-	flag.Float64Var(&cfg.TracingSampleRatio, "tracing-sample-ratio", getEnvFloat64("OTEL_TRACES_SAMPLER_ARG", 1.0), "Trace sampling ratio 0.0-1.0 (or OTEL_TRACES_SAMPLER_ARG env var)")
-	flag.BoolVar(&cfg.TracingInsecure, "tracing-insecure", getEnvBool("OTEL_EXPORTER_OTLP_INSECURE", true), "Disable TLS for tracing exporter (or OTEL_EXPORTER_OTLP_INSECURE env var)")
+	pflag.String("tracing-endpoint", "", "OTLP collector endpoint - enables tracing when set")
+	pflag.String("tracing-protocol", "grpc", "OTLP protocol: grpc or http")
+	pflag.Float64("tracing-sample-ratio", 1.0, "Trace sampling ratio 0.0-1.0")
+	pflag.Bool("tracing-insecure", true, "Disable TLS for tracing exporter")
 
-	showVersion := flag.Bool("version", false, "Print version and exit")
-	flag.Parse()
+	showVersion := pflag.Bool("version", false, "Print version and exit")
+	pflag.Parse()
+
+	// Bind pflags to viper
+	if err := viper.BindPFlags(pflag.CommandLine); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: failed to bind pflags to viper: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Bind environment variables for configuration
+	_ = viper.BindEnv("aqua-url", "AQUA_URL")
+	_ = viper.BindEnv("aqua-auth-url", "AQUA_AUTH_URL")
+	_ = viper.BindEnv("aqua-api-key", "AQUA_API_KEY")
+	_ = viper.BindEnv("aqua-hmac-secret", "AQUA_HMAC_SECRET")
+	_ = viper.BindEnv("aqua-registry", "AQUA_REGISTRY")
+	_ = viper.BindEnv("registry-mirrors", "REGISTRY_MIRRORS")
+	_ = viper.BindEnv("tracing-endpoint", "OTEL_EXPORTER_OTLP_ENDPOINT")
+	_ = viper.BindEnv("tracing-protocol", "OTEL_EXPORTER_OTLP_PROTOCOL")
+	_ = viper.BindEnv("tracing-sample-ratio", "OTEL_TRACES_SAMPLER_ARG")
+	_ = viper.BindEnv("tracing-insecure", "OTEL_EXPORTER_OTLP_INSECURE")
 
 	if *showVersion {
 		fmt.Printf("aqua-trigger version %s\n", version)
 		os.Exit(0)
+	}
+
+	// Get configuration values from viper (handles flag + env var precedence)
+	cfg := &Config{
+		AquaURL:            viper.GetString("aqua-url"),
+		AquaAuthURL:        viper.GetString("aqua-auth-url"),
+		AquaAPIKey:         viper.GetString("aqua-api-key"),
+		AquaHMACSecret:     viper.GetString("aqua-hmac-secret"),
+		AquaRegistry:       viper.GetString("aqua-registry"),
+		RegistryMirrors:    viper.GetString("registry-mirrors"),
+		Timeout:            viper.GetDuration("timeout"),
+		DryRun:             viper.GetBool("dry-run"),
+		Verbose:            viper.GetBool("verbose"),
+		TracingEndpoint:    viper.GetString("tracing-endpoint"),
+		TracingProtocol:    viper.GetString("tracing-protocol"),
+		TracingSampleRatio: viper.GetFloat64("tracing-sample-ratio"),
+		TracingInsecure:    viper.GetBool("tracing-insecure"),
 	}
 
 	// Validate required configuration
@@ -119,7 +157,9 @@ func main() {
 		os.Exit(1)
 	}
 	defer func() {
-		if err := tp.Shutdown(ctx); err != nil {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if err := tp.Shutdown(shutdownCtx); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to shutdown tracer: %v\n", err)
 		}
 	}()
@@ -495,35 +535,4 @@ func deduplicateImages(images []imageref.ImageRef) []imageref.ImageRef {
 	}
 
 	return result
-}
-
-// getEnvBool returns the boolean value of an environment variable, or the default value if not set.
-func getEnvBool(key string, defaultValue bool) bool {
-	val := os.Getenv(key)
-	if val == "" {
-		return defaultValue
-	}
-	return val == "true" || val == "1" || val == "yes"
-}
-
-// getEnvString returns the string value of an environment variable, or the default value if not set.
-func getEnvString(key, defaultValue string) string {
-	val := os.Getenv(key)
-	if val == "" {
-		return defaultValue
-	}
-	return val
-}
-
-// getEnvFloat64 returns the float64 value of an environment variable, or the default value if not set.
-func getEnvFloat64(key string, defaultValue float64) float64 {
-	val := os.Getenv(key)
-	if val == "" {
-		return defaultValue
-	}
-	var f float64
-	if _, err := fmt.Sscanf(val, "%f", &f); err != nil {
-		return defaultValue
-	}
-	return f
 }

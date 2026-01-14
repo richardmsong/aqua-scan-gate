@@ -15,6 +15,9 @@ import (
 	"time"
 )
 
+// DefaultAuthURL is the default authentication endpoint (US region)
+const DefaultAuthURL = "https://api.cloudsploit.com"
+
 // AuthConfig holds authentication configuration
 type AuthConfig struct {
 	// APIKey is the API key for authentication (used in X-API-Key header)
@@ -25,11 +28,11 @@ type AuthConfig struct {
 
 	// AuthURL is the regional authentication endpoint URL
 	// Regional endpoints:
-	//   - US: https://api.cloudsploit.com
+	//   - US: https://api.cloudsploit.com (default)
 	//   - EU: https://eu-1.api.cloudsploit.com
 	//   - Singapore: https://asia-1.api.cloudsploit.com
 	//   - Sydney: https://ap-2.api.cloudsploit.com
-	// If empty, falls back to baseURL (not recommended for production)
+	// If empty, defaults to US region (https://api.cloudsploit.com)
 	AuthURL string
 
 	// TokenValidity is the token validity in minutes (default: 240)
@@ -63,16 +66,15 @@ type TokenManager struct {
 }
 
 // NewTokenManager creates a new token manager
-// authURL should be the regional authentication endpoint (e.g., https://api.cloudsploit.com)
-// If authURL is empty, it falls back to baseURL (not recommended for production)
+// If AuthURL is empty in config, it defaults to the US region (https://api.cloudsploit.com)
 func NewTokenManager(baseURL string, config AuthConfig, httpClient *http.Client, verbose bool) *TokenManager {
 	if config.TokenValidity == 0 {
 		config.TokenValidity = 240 // Default 240 minutes
 	}
-	// Use AuthURL if provided, otherwise fall back to baseURL
+	// Use AuthURL if provided, otherwise default to US region
 	authURL := config.AuthURL
 	if authURL == "" {
-		authURL = baseURL
+		authURL = DefaultAuthURL
 	}
 	return &TokenManager{
 		authURL:    authURL,

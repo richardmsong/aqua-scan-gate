@@ -40,6 +40,7 @@ var _ = Describe("TokenManager", func() {
 			tm := NewTokenManager(server.URL, AuthConfig{
 				APIKey:     "my-api-key",
 				HMACSecret: "my-secret",
+				AuthURL:    server.URL,
 			}, &http.Client{}, false)
 
 			token, err := tm.GetToken(context.Background())
@@ -65,6 +66,7 @@ var _ = Describe("TokenManager", func() {
 			tm := NewTokenManager(server.URL, AuthConfig{
 				APIKey:     "my-api-key",
 				HMACSecret: "my-secret",
+				AuthURL:    server.URL,
 			}, &http.Client{}, false)
 
 			// First call
@@ -101,6 +103,7 @@ var _ = Describe("TokenManager", func() {
 			tm := NewTokenManager(server.URL, AuthConfig{
 				APIKey:     "my-api-key",
 				HMACSecret: "my-secret",
+				AuthURL:    server.URL,
 			}, &http.Client{}, false)
 
 			// Make concurrent requests
@@ -138,6 +141,7 @@ var _ = Describe("TokenManager", func() {
 			tm := NewTokenManager(server.URL, AuthConfig{
 				APIKey:     "bad-key",
 				HMACSecret: "my-secret",
+				AuthURL:    server.URL,
 			}, &http.Client{}, false)
 
 			_, err := tm.GetToken(context.Background())
@@ -160,6 +164,7 @@ var _ = Describe("TokenManager", func() {
 			tm := NewTokenManager(server.URL, AuthConfig{
 				APIKey:     "my-api-key",
 				HMACSecret: "my-secret",
+				AuthURL:    server.URL,
 			}, &http.Client{}, false)
 
 			_, err := tm.GetToken(context.Background())
@@ -287,31 +292,16 @@ var _ = Describe("TokenManager with AuthURL", func() {
 		Expect(token).To(Equal("token-from-auth-server"))
 	})
 
-	It("should fall back to baseURL when AuthURL is not provided", func() {
-		// Set up mock server acting as baseURL
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			Expect(r.Method).To(Equal("POST"))
-			Expect(r.URL.Path).To(Equal("/v2/tokens"))
-
-			resp := tokenResponse{
-				Status: 200,
-				Code:   0,
-				Data:   "token-from-base-url",
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(resp)
-		}))
-		defer server.Close()
-
-		// No AuthURL provided, should use baseURL
-		tm := NewTokenManager(server.URL, AuthConfig{
+	It("should default to US region when AuthURL is not provided", func() {
+		// When AuthURL is not provided, it should default to DefaultAuthURL (US region)
+		tm := NewTokenManager("https://api.aquasec.com", AuthConfig{
 			APIKey:     "my-api-key",
 			HMACSecret: "my-secret",
-			// AuthURL not set
+			// AuthURL not set - should default to US region
 		}, &http.Client{}, false)
 
-		token, err := tm.GetToken(context.Background())
-		Expect(err).NotTo(HaveOccurred())
-		Expect(token).To(Equal("token-from-base-url"))
+		// Verify the token manager is configured with the default US region URL
+		Expect(tm.authURL).To(Equal(DefaultAuthURL))
+		Expect(tm.authURL).To(Equal("https://api.cloudsploit.com"))
 	})
 })

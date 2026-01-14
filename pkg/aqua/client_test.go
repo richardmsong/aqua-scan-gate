@@ -132,6 +132,7 @@ var _ = Describe("GetScanResult", func() {
 				Auth: AuthConfig{
 					APIKey:     "test-api-key",
 					HMACSecret: "test-secret",
+					AuthURL:    server.URL,
 				},
 			})
 		})
@@ -159,6 +160,7 @@ var _ = Describe("GetScanResult", func() {
 				Auth: AuthConfig{
 					APIKey:     "test-api-key",
 					HMACSecret: "test-secret",
+					AuthURL:    server.URL,
 				},
 			})
 		})
@@ -183,6 +185,7 @@ var _ = Describe("GetScanResult", func() {
 				Auth: AuthConfig{
 					APIKey:     "test-api-key",
 					HMACSecret: "test-secret",
+					AuthURL:    server.URL,
 				},
 			})
 		})
@@ -212,6 +215,7 @@ var _ = Describe("GetScanResult", func() {
 				Auth: AuthConfig{
 					APIKey:     "bad-api-key",
 					HMACSecret: "test-secret",
+					AuthURL:    server.URL,
 				},
 			})
 		})
@@ -258,6 +262,7 @@ var _ = Describe("TriggerScan", func() {
 				Auth: AuthConfig{
 					APIKey:     "test-api-key",
 					HMACSecret: "test-secret",
+					AuthURL:    server.URL,
 				},
 			})
 		})
@@ -283,6 +288,7 @@ var _ = Describe("TriggerScan", func() {
 				Auth: AuthConfig{
 					APIKey:     "test-api-key",
 					HMACSecret: "test-secret",
+					AuthURL:    server.URL,
 				},
 			})
 		})
@@ -312,6 +318,7 @@ var _ = Describe("TriggerScan", func() {
 				Auth: AuthConfig{
 					APIKey:     "expired-api-key",
 					HMACSecret: "test-secret",
+					AuthURL:    server.URL,
 				},
 			})
 		})
@@ -336,6 +343,7 @@ var _ = Describe("TriggerScan", func() {
 				Auth: AuthConfig{
 					APIKey:     "test-api-key",
 					HMACSecret: "test-secret",
+					AuthURL:    server.URL,
 				},
 			})
 		})
@@ -425,6 +433,7 @@ var _ = Describe("GetRegistries", func() {
 				Auth: AuthConfig{
 					APIKey:     "test-api-key",
 					HMACSecret: "test-secret",
+					AuthURL:    server.URL,
 				},
 			})
 		})
@@ -451,6 +460,7 @@ var _ = Describe("GetRegistries", func() {
 				Auth: AuthConfig{
 					APIKey:     "test-api-key",
 					HMACSecret: "test-secret",
+					AuthURL:    server.URL,
 				},
 			})
 		})
@@ -528,6 +538,7 @@ var _ = Describe("FindRegistryByPrefix", func() {
 				Auth: AuthConfig{
 					APIKey:     "test-api-key",
 					HMACSecret: "test-secret",
+					AuthURL:    server.URL,
 				},
 			})
 		})
@@ -587,6 +598,7 @@ var _ = Describe("FindRegistryByPrefix", func() {
 				Auth: AuthConfig{
 					APIKey:     "test-api-key",
 					HMACSecret: "test-secret",
+					AuthURL:    server.URL,
 				},
 			})
 		})
@@ -652,6 +664,7 @@ var _ = Describe("Registry Caching", func() {
 				Auth: AuthConfig{
 					APIKey:     "test-api-key",
 					HMACSecret: "test-secret",
+					AuthURL:    server.URL,
 				},
 			})
 		})
@@ -717,6 +730,7 @@ var _ = Describe("Registry Caching", func() {
 				Auth: AuthConfig{
 					APIKey:     "test-api-key",
 					HMACSecret: "test-secret",
+					AuthURL:    server.URL,
 				},
 			})
 		})
@@ -781,6 +795,7 @@ var _ = Describe("Registry Caching", func() {
 				Auth: AuthConfig{
 					APIKey:     "test-api-key",
 					HMACSecret: "test-secret",
+					AuthURL:    server.URL,
 				},
 			})
 		})

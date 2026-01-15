@@ -552,7 +552,7 @@ func (c *aquaClient) GetRegistries(ctx context.Context) ([]Registry, error) {
 		}
 		// File cache miss or error, continue to fetch from API
 	}
-  span.SetAttributes(attribute.Bool("cache_hit", false))
+	span.SetAttributes(attribute.Bool("cache_hit", false))
 	// Cache miss or expired, fetch from API
 	return c.fetchRegistries(ctx)
 }

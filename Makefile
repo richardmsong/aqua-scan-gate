@@ -96,7 +96,7 @@ build: manifests generate fmt vet ## Build manager binary.
 
 .PHONY: build-trigger
 build-trigger: fmt vet ## Build aqua-trigger CLI binary.
-	go build -o bin/aqua-trigger cmd/trigger/main.go
+	go build -o bin/aqua-trigger cmd/trigger/aqua-trigger.go
 
 .PHONY: build-all
 build-all: build build-trigger ## Build all binaries (manager and CLI).

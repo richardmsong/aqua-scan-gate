@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -43,6 +44,12 @@ const (
 	IndexFieldSchedulingGate = "spec.schedulingGates.name"
 )
 
+// ImageRefResolver resolves image references to their digests.
+// This interface allows for easy mocking in tests.
+type ImageRefResolver interface {
+	ResolveImageRef(ctx context.Context, img imageref.ImageRef) (imageref.ImageRef, error)
+}
+
 // PodGateReconciler reconciles Pods with our scheduling gate
 type PodGateReconciler struct {
 	client.Client
@@ -52,6 +59,8 @@ type PodGateReconciler struct {
 	ScanNamespace string
 	// Namespaces to exclude from scanning
 	ExcludedNamespaces map[string]bool
+	// Resolver resolves image tags to digests via registry lookups
+	Resolver ImageRefResolver
 }
 
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;update;patch
@@ -112,6 +121,38 @@ func (r *PodGateReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		logger.Info("No images found in pod, removing gate", "pod", pod.Name)
 		removeSchedulingGate(&pod, SchedulingGateName)
 		return ctrl.Result{}, r.Update(ctx, &pod)
+	}
+
+	// Resolve digests for images that don't have them
+	if r.Resolver != nil {
+		for i, img := range images {
+			if img.Digest == "" {
+				resolveCtx, resolveSpan := tracing.StartSpan(ctx, "ResolveImageDigest",
+					trace.WithAttributes(
+						tracing.AttrImageName.String(img.Image),
+					),
+				)
+
+				resolved, err := r.Resolver.ResolveImageRef(resolveCtx, img)
+				if err != nil {
+					resolveSpan.RecordError(err)
+					resolveSpan.SetStatus(codes.Error, "Failed to resolve image digest")
+					resolveSpan.End()
+					logger.Error(err, "Failed to resolve image digest", "image", img.Image)
+					if r.Recorder != nil {
+						r.Recorder.Eventf(&pod, corev1.EventTypeWarning, "DigestResolutionFailed",
+							"Failed to resolve digest for image %s: %v", img.Image, err)
+					}
+					// Requeue to retry later (transient registry errors)
+					return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+				}
+
+				resolveSpan.SetAttributes(tracing.AttrImageDigest.String(resolved.Digest))
+				resolveSpan.End()
+				logger.V(1).Info("Resolved image digest", "image", img.Image, "digest", resolved.Digest)
+				images[i] = resolved
+			}
+		}
 	}
 
 	// Check/create ImageScan for each image

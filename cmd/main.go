@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	securityv1alpha1 "github.com/richardmsong/aqua-scan-gate/api/v1alpha1"
 	"github.com/richardmsong/aqua-scan-gate/internal/controller"
@@ -217,6 +218,7 @@ func main() {
 	mgr.GetWebhookServer().Register("/mutate-v1-pod", &webhook.Admission{
 		Handler: &webhookpkg.PodMutator{
 			Client:             mgr.GetClient(),
+			Decoder:            admission.NewDecoder(mgr.GetScheme()),
 			ExcludedNamespaces: excludedNS,
 		},
 	})

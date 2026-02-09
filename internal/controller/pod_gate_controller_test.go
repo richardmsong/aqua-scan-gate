@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -9,6 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -16,6 +18,38 @@ import (
 	securityv1alpha1 "github.com/richardmsong/aqua-scan-gate/api/v1alpha1"
 	"github.com/richardmsong/aqua-scan-gate/pkg/imageref"
 )
+
+// mockResolver is a mock implementation for testing digest resolution
+type mockResolver struct {
+	digests map[string]string // image -> digest mapping
+	errors  map[string]error  // image -> error mapping
+}
+
+func newMockResolver() *mockResolver {
+	return &mockResolver{
+		digests: make(map[string]string),
+		errors:  make(map[string]error),
+	}
+}
+
+func (m *mockResolver) ResolveImageRef(_ context.Context, img imageref.ImageRef) (imageref.ImageRef, error) {
+	if img.Digest != "" {
+		return img, nil
+	}
+	if err, ok := m.errors[img.Image]; ok {
+		return img, err
+	}
+	if digest, ok := m.digests[img.Image]; ok {
+		return imageref.ImageRef{
+			Image:  img.Image,
+			Digest: digest,
+		}, nil
+	}
+	return img, nil
+}
+
+// Compile-time check that mockResolver implements ImageRefResolver
+var _ ImageRefResolver = (*mockResolver)(nil)
 
 var _ = Describe("PodGateReconciler", func() {
 	var (
@@ -482,6 +516,211 @@ var _ = Describe("PodGateReconciler", func() {
 				requests := r.mapImageScanToPods(ctx, imageScan)
 				Expect(requests).To(HaveLen(1))
 				Expect(requests[0].Name).To(Equal("pod-with-init"))
+			})
+		})
+	})
+
+	Describe("Digest Resolution", func() {
+		Context("when resolver is provided and image has no digest", func() {
+			It("should resolve the digest and create ImageScan with resolved digest", func() {
+				// Create a pod with our gate and a tag-based image
+				pod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-pod",
+						Namespace: "default",
+					},
+					Spec: corev1.PodSpec{
+						SchedulingGates: []corev1.PodSchedulingGate{
+							{Name: SchedulingGateName},
+						},
+						Containers: []corev1.Container{
+							{Name: "app", Image: "nginx:latest"},
+						},
+					},
+				}
+
+				fakeClient := fake.NewClientBuilder().
+					WithScheme(scheme).
+					WithObjects(pod).
+					Build()
+
+				// Create mock resolver that returns a digest
+				mockRes := newMockResolver()
+				mockRes.digests["nginx:latest"] = "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+
+				recorder := record.NewFakeRecorder(10)
+				r := &PodGateReconciler{
+					Client:   fakeClient,
+					Scheme:   scheme,
+					Recorder: recorder,
+					Resolver: mockRes,
+				}
+
+				result, err := r.Reconcile(ctx, reconcile.Request{
+					NamespacedName: types.NamespacedName{
+						Name:      "test-pod",
+						Namespace: "default",
+					},
+				})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result.RequeueAfter).To(BeZero())
+
+				// Verify ImageScan was created with the resolved digest
+				var imageScanList securityv1alpha1.ImageScanList
+				err = fakeClient.List(ctx, &imageScanList)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(imageScanList.Items).To(HaveLen(1))
+				Expect(imageScanList.Items[0].Spec.Digest).To(Equal("sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"))
+			})
+		})
+
+		Context("when resolver returns an error", func() {
+			It("should requeue and emit an event", func() {
+				pod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-pod",
+						Namespace: "default",
+					},
+					Spec: corev1.PodSpec{
+						SchedulingGates: []corev1.PodSchedulingGate{
+							{Name: SchedulingGateName},
+						},
+						Containers: []corev1.Container{
+							{Name: "app", Image: "nginx:latest"},
+						},
+					},
+				}
+
+				fakeClient := fake.NewClientBuilder().
+					WithScheme(scheme).
+					WithObjects(pod).
+					Build()
+
+				// Create mock resolver that returns an error
+				mockRes := newMockResolver()
+				mockRes.errors["nginx:latest"] = fmt.Errorf("registry unreachable")
+
+				recorder := record.NewFakeRecorder(10)
+				r := &PodGateReconciler{
+					Client:   fakeClient,
+					Scheme:   scheme,
+					Recorder: recorder,
+					Resolver: mockRes,
+				}
+
+				result, err := r.Reconcile(ctx, reconcile.Request{
+					NamespacedName: types.NamespacedName{
+						Name:      "test-pod",
+						Namespace: "default",
+					},
+				})
+				Expect(err).NotTo(HaveOccurred())
+				// Should requeue after 30 seconds for transient errors
+				Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+
+				// Verify no ImageScan was created
+				var imageScanList securityv1alpha1.ImageScanList
+				err = fakeClient.List(ctx, &imageScanList)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(imageScanList.Items).To(BeEmpty())
+
+				// Verify an event was emitted
+				Eventually(recorder.Events).Should(Receive(ContainSubstring("DigestResolutionFailed")))
+			})
+		})
+
+		Context("when resolver is nil", func() {
+			It("should proceed without resolving digests", func() {
+				pod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-pod",
+						Namespace: "default",
+					},
+					Spec: corev1.PodSpec{
+						SchedulingGates: []corev1.PodSchedulingGate{
+							{Name: SchedulingGateName},
+						},
+						Containers: []corev1.Container{
+							{Name: "app", Image: "nginx:latest"},
+						},
+					},
+				}
+
+				fakeClient := fake.NewClientBuilder().
+					WithScheme(scheme).
+					WithObjects(pod).
+					Build()
+
+				r := &PodGateReconciler{
+					Client: fakeClient,
+					Scheme: scheme,
+					// No Resolver provided
+				}
+
+				_, err := r.Reconcile(ctx, reconcile.Request{
+					NamespacedName: types.NamespacedName{
+						Name:      "test-pod",
+						Namespace: "default",
+					},
+				})
+				Expect(err).NotTo(HaveOccurred())
+
+				// ImageScan should be created with empty digest
+				var imageScanList securityv1alpha1.ImageScanList
+				err = fakeClient.List(ctx, &imageScanList)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(imageScanList.Items).To(HaveLen(1))
+				Expect(imageScanList.Items[0].Spec.Digest).To(BeEmpty())
+			})
+		})
+
+		Context("when image already has a digest", func() {
+			It("should not call the resolver", func() {
+				digestImage := "nginx@sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+				pod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-pod",
+						Namespace: "default",
+					},
+					Spec: corev1.PodSpec{
+						SchedulingGates: []corev1.PodSchedulingGate{
+							{Name: SchedulingGateName},
+						},
+						Containers: []corev1.Container{
+							{Name: "app", Image: digestImage},
+						},
+					},
+				}
+
+				fakeClient := fake.NewClientBuilder().
+					WithScheme(scheme).
+					WithObjects(pod).
+					Build()
+
+				// Create mock resolver that would fail if called
+				mockRes := newMockResolver()
+				mockRes.errors["nginx@sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"] = fmt.Errorf("should not be called")
+
+				r := &PodGateReconciler{
+					Client:   fakeClient,
+					Scheme:   scheme,
+					Resolver: mockRes,
+				}
+
+				_, err := r.Reconcile(ctx, reconcile.Request{
+					NamespacedName: types.NamespacedName{
+						Name:      "test-pod",
+						Namespace: "default",
+					},
+				})
+				Expect(err).NotTo(HaveOccurred())
+
+				// ImageScan should be created with the original digest
+				var imageScanList securityv1alpha1.ImageScanList
+				err = fakeClient.List(ctx, &imageScanList)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(imageScanList.Items).To(HaveLen(1))
+				Expect(imageScanList.Items[0].Spec.Digest).To(Equal("sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"))
 			})
 		})
 	})

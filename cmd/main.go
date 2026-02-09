@@ -56,6 +56,9 @@ func main() {
 	pflag.Duration("rescan-interval", 24*time.Hour, "Rescan interval (env: AQUA_RESCAN_INTERVAL)")
 	pflag.String("registry-mirrors", "", "Registry mirror mappings (env: AQUA_REGISTRY_MIRRORS)")
 
+	// Webhook configuration
+	pflag.String("webhook-cert-path", "", "Directory containing webhook TLS certificates (env: AQUA_WEBHOOK_CERT_PATH)")
+
 	// Tracing flags - tracing is enabled when endpoint is provided
 	// These use explicit BindEnv to support OTEL standardized env var names
 	pflag.String("tracing-endpoint", "", "OTLP collector endpoint (env: OTEL_EXPORTER_OTLP_ENDPOINT)")
@@ -98,6 +101,7 @@ func main() {
 	scanNamespace := viper.GetString("scan-namespace")
 	rescanInterval := viper.GetDuration("rescan-interval")
 	registryMirrors := viper.GetString("registry-mirrors")
+	webhookCertPath := viper.GetString("webhook-cert-path")
 	tracingEndpoint := viper.GetString("tracing-endpoint")
 	tracingProtocol := viper.GetString("tracing-protocol")
 	tracingSampleRatio := viper.GetFloat64("tracing-sample-ratio")
@@ -164,11 +168,19 @@ func main() {
 		Timeout:         30 * time.Second,
 	})
 
+	// Configure webhook server options
+	webhookServerOpts := webhook.Options{}
+	if webhookCertPath != "" {
+		webhookServerOpts.CertDir = webhookCertPath
+		setupLog.Info("using custom webhook certificate path", "path", webhookCertPath)
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
 		Metrics: metricsserver.Options{
 			BindAddress: metricsAddr,
 		},
+		WebhookServer:          webhook.NewServer(webhookServerOpts),
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "aqua-scan-gate.security.example.com",
 		HealthProbeBindAddress: probeAddr,

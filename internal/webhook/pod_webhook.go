@@ -24,7 +24,7 @@ const (
 // PodMutator adds scheduling gate to pods
 type PodMutator struct {
 	Client  client.Client
-	decoder admission.Decoder
+	Decoder admission.Decoder
 
 	// ExcludedNamespaces won't have the gate added
 	ExcludedNamespaces map[string]bool
@@ -48,7 +48,7 @@ func (m *PodMutator) Handle(ctx context.Context, req admission.Request) admissio
 	logger := log.FromContext(ctx)
 
 	pod := &corev1.Pod{}
-	if err := m.decoder.Decode(req, pod); err != nil {
+	if err := m.Decoder.Decode(req, pod); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "Failed to decode pod")
 		return admission.Errored(http.StatusBadRequest, err)
@@ -128,9 +128,4 @@ func (m *PodMutator) allImagesExcluded(pod *corev1.Pod) bool {
 	}
 
 	return true
-}
-
-func (m *PodMutator) InjectDecoder(d admission.Decoder) error {
-	m.decoder = d
-	return nil
 }

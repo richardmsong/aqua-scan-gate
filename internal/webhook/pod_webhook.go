@@ -33,7 +33,7 @@ type PodMutator struct {
 	ExcludedImages []string
 }
 
-// +kubebuilder:webhook:path=/mutate-v1-pod,mutating=true,failurePolicy=fail,sideEffects=None,groups="",resources=pods,verbs=create,versions=v1,name=mpod.scans.aquasec.community,admissionReviewVersions=v1
+// +kubebuilder:webhook:path=/mutate-v1-pod,mutating=true,failurePolicy=ignore,sideEffects=None,groups="",resources=pods,verbs=create,versions=v1,name=mpod.scans.aquasec.community,admissionReviewVersions=v1
 
 func (m *PodMutator) Handle(ctx context.Context, req admission.Request) admission.Response {
 	ctx, span := tracing.StartSpan(ctx, "PodMutator.Handle",

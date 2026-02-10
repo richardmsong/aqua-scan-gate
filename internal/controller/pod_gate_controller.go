@@ -6,6 +6,10 @@ import (
 	"strings"
 	"time"
 
+	credhelper "github.com/chrismellard/docker-credential-acr-env/pkg/credhelper"
+	"github.com/google/go-containerregistry/pkg/authn"
+	k8sauthn "github.com/google/go-containerregistry/pkg/authn/kubernetes"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -65,6 +69,8 @@ type PodGateReconciler struct {
 
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get
 // +kubebuilder:rbac:groups=scans.aquasec.community,resources=imagescans,verbs=get;list;watch;create
 
 func (r *PodGateReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -124,34 +130,43 @@ func (r *PodGateReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	// Resolve digests for images that don't have them
-	if r.Resolver != nil {
-		for i, img := range images {
-			if img.Digest == "" {
-				resolveCtx, resolveSpan := tracing.StartSpan(ctx, "ResolveImageDigest",
-					trace.WithAttributes(
-						tracing.AttrImageName.String(img.Image),
-					),
-				)
+	// Use injected resolver (for tests) or build dynamic resolver (for production)
+	resolver := r.Resolver
+	if resolver == nil {
+		builtResolver, err := r.buildResolverForPod(ctx, &pod)
+		if err != nil {
+			logger.Error(err, "Failed to build resolver for pod")
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+		resolver = builtResolver
+	}
 
-				resolved, err := r.Resolver.ResolveImageRef(resolveCtx, img)
-				if err != nil {
-					resolveSpan.RecordError(err)
-					resolveSpan.SetStatus(codes.Error, "Failed to resolve image digest")
-					resolveSpan.End()
-					logger.Error(err, "Failed to resolve image digest", "image", img.Image)
-					if r.Recorder != nil {
-						r.Recorder.Eventf(&pod, corev1.EventTypeWarning, "DigestResolutionFailed",
-							"Failed to resolve digest for image %s: %v", img.Image, err)
-					}
-					// Requeue to retry later (transient registry errors)
-					return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-				}
+	for i, img := range images {
+		if img.Digest == "" {
+			resolveCtx, resolveSpan := tracing.StartSpan(ctx, "ResolveImageDigest",
+				trace.WithAttributes(
+					tracing.AttrImageName.String(img.Image),
+				),
+			)
 
-				resolveSpan.SetAttributes(tracing.AttrImageDigest.String(resolved.Digest))
+			resolved, err := resolver.ResolveImageRef(resolveCtx, img)
+			if err != nil {
+				resolveSpan.RecordError(err)
+				resolveSpan.SetStatus(codes.Error, "Failed to resolve image digest")
 				resolveSpan.End()
-				logger.V(1).Info("Resolved image digest", "image", img.Image, "digest", resolved.Digest)
-				images[i] = resolved
+				logger.Error(err, "Failed to resolve image digest", "image", img.Image)
+				if r.Recorder != nil {
+					r.Recorder.Eventf(&pod, corev1.EventTypeWarning, "DigestResolutionFailed",
+						"Failed to resolve digest for image %s: %v", img.Image, err)
+				}
+				// Requeue to retry later (transient registry errors)
+				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 			}
+
+			resolveSpan.SetAttributes(tracing.AttrImageDigest.String(resolved.Digest))
+			resolveSpan.End()
+			logger.V(1).Info("Resolved image digest", "image", img.Image, "digest", resolved.Digest)
+			images[i] = resolved
 		}
 	}
 
@@ -384,4 +399,91 @@ func (r *PodGateReconciler) mapImageScanToPods(ctx context.Context, obj client.O
 	}
 
 	return requests
+}
+
+// buildResolverForPod builds a per-pod resolver that chains multiple auth sources:
+// 1. Pod + ServiceAccount imagePullSecrets
+// 2. ACR Workload Identity (auto-detected from env) - emulates node pull account
+// 3. Fallback to DefaultKeychain (docker config)
+func (r *PodGateReconciler) buildResolverForPod(ctx context.Context, pod *corev1.Pod) (*imageref.Resolver, error) {
+	logger := log.FromContext(ctx)
+	var keychains []authn.Keychain
+
+	// 1. Pod + ServiceAccount imagePullSecrets
+	secrets, err := r.getImagePullSecrets(ctx, pod)
+	if err != nil {
+		logger.V(1).Info("Failed to get image pull secrets, continuing without", "error", err)
+	} else if len(secrets) > 0 {
+		k8sKeychain, err := k8sauthn.NewFromPullSecrets(ctx, secrets)
+		if err != nil {
+			logger.V(1).Info("Failed to create keychain from pull secrets, continuing without", "error", err)
+		} else {
+			keychains = append(keychains, k8sKeychain)
+		}
+	}
+
+	// 2. ACR Workload Identity (auto-detected from env)
+	// Emulates the node pull account — the controller authenticates to ACR
+	// with its own identity, same as a node would via the credential provider.
+	acrKeychain := authn.NewKeychainFromHelper(credhelper.NewACRCredentialsHelper())
+	keychains = append(keychains, acrKeychain)
+
+	// 3. Fallback to DefaultKeychain (docker config)
+	keychains = append(keychains, authn.DefaultKeychain)
+
+	return imageref.NewResolver(
+		remote.WithAuthFromKeychain(authn.NewMultiKeychain(keychains...)),
+	), nil
+}
+
+// getImagePullSecrets retrieves image pull secrets from the pod and its ServiceAccount.
+// It deduplicates secrets by name and returns the actual Secret objects.
+func (r *PodGateReconciler) getImagePullSecrets(ctx context.Context, pod *corev1.Pod) ([]corev1.Secret, error) {
+	logger := log.FromContext(ctx)
+	secretNames := make(map[string]bool)
+
+	// Collect secret names from pod spec
+	for _, ref := range pod.Spec.ImagePullSecrets {
+		secretNames[ref.Name] = true
+	}
+
+	// Collect secret names from ServiceAccount
+	saName := pod.Spec.ServiceAccountName
+	if saName == "" {
+		saName = "default"
+	}
+
+	var sa corev1.ServiceAccount
+	if err := r.Get(ctx, types.NamespacedName{
+		Name:      saName,
+		Namespace: pod.Namespace,
+	}, &sa); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("failed to get ServiceAccount %s: %w", saName, err)
+		}
+		logger.V(1).Info("ServiceAccount not found, using only pod imagePullSecrets", "serviceAccount", saName)
+	} else {
+		for _, ref := range sa.ImagePullSecrets {
+			secretNames[ref.Name] = true
+		}
+	}
+
+	// Fetch the actual Secret objects
+	var secrets []corev1.Secret
+	for name := range secretNames {
+		var secret corev1.Secret
+		if err := r.Get(ctx, types.NamespacedName{
+			Name:      name,
+			Namespace: pod.Namespace,
+		}, &secret); err != nil {
+			if apierrors.IsNotFound(err) {
+				logger.V(1).Info("ImagePullSecret not found", "secret", name)
+				continue
+			}
+			return nil, fmt.Errorf("failed to get secret %s: %w", name, err)
+		}
+		secrets = append(secrets, secret)
+	}
+
+	return secrets, nil
 }

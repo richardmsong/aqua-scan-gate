@@ -67,6 +67,9 @@ var _ = Describe("PodGateReconciler", func() {
 	Describe("Reconcile", func() {
 		Context("when all images are registered", func() {
 			It("should remove the scheduling gate", func() {
+				// Known digest that the mock resolver will return
+				testDigest := "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+
 				// Create a pod with our gate
 				pod := &corev1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
@@ -83,14 +86,16 @@ var _ = Describe("PodGateReconciler", func() {
 					},
 				}
 
-				// Create a registered ImageScan
+				// Create a registered ImageScan with the resolved digest
+				// The scan name is based on the digest after resolution
 				imageScan := &securityv1alpha1.ImageScan{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      imageref.ScanName(imageref.ImageRef{Image: "nginx:latest"}),
+						Name:      imageref.ScanName(imageref.ImageRef{Image: "nginx:latest", Digest: testDigest}),
 						Namespace: "default",
 					},
 					Spec: securityv1alpha1.ImageScanSpec{
-						Image: "nginx:latest",
+						Image:  "nginx:latest",
+						Digest: testDigest,
 					},
 					Status: securityv1alpha1.ImageScanStatus{
 						Phase: securityv1alpha1.ScanPhaseRegistered,
@@ -102,9 +107,14 @@ var _ = Describe("PodGateReconciler", func() {
 					WithObjects(pod, imageScan).
 					Build()
 
+				// Mock resolver that returns a known digest
+				mockRes := newMockResolver()
+				mockRes.digests["nginx:latest"] = testDigest
+
 				r := &PodGateReconciler{
-					Client: fakeClient,
-					Scheme: scheme,
+					Client:   fakeClient,
+					Scheme:   scheme,
+					Resolver: mockRes,
 				}
 
 				_, err := r.Reconcile(ctx, reconcile.Request{
@@ -629,8 +639,8 @@ var _ = Describe("PodGateReconciler", func() {
 			})
 		})
 
-		Context("when resolver is nil", func() {
-			It("should proceed without resolving digests", func() {
+		Context("when resolver is nil (dynamic resolver)", func() {
+			It("should build a dynamic resolver and resolve digests", func() {
 				pod := &corev1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-pod",
@@ -654,7 +664,7 @@ var _ = Describe("PodGateReconciler", func() {
 				r := &PodGateReconciler{
 					Client: fakeClient,
 					Scheme: scheme,
-					// No Resolver provided
+					// No Resolver provided - dynamic resolver will be built
 				}
 
 				_, err := r.Reconcile(ctx, reconcile.Request{
@@ -665,12 +675,13 @@ var _ = Describe("PodGateReconciler", func() {
 				})
 				Expect(err).NotTo(HaveOccurred())
 
-				// ImageScan should be created with empty digest
+				// ImageScan should be created with resolved digest (dynamic resolver contacts registry)
 				var imageScanList securityv1alpha1.ImageScanList
 				err = fakeClient.List(ctx, &imageScanList)
 				Expect(err).NotTo(HaveOccurred())
 				Expect(imageScanList.Items).To(HaveLen(1))
-				Expect(imageScanList.Items[0].Spec.Digest).To(BeEmpty())
+				// The dynamic resolver should have resolved the digest from Docker Hub
+				Expect(imageScanList.Items[0].Spec.Digest).To(HavePrefix("sha256:"))
 			})
 		})
 

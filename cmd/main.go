@@ -19,14 +19,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
-	"github.com/google/go-containerregistry/pkg/authn"
-	"github.com/google/go-containerregistry/pkg/v1/remote"
-
 	securityv1alpha1 "github.com/richardmsong/aqua-scan-gate/api/v1alpha1"
 	"github.com/richardmsong/aqua-scan-gate/internal/controller"
 	webhookpkg "github.com/richardmsong/aqua-scan-gate/internal/webhook"
 	"github.com/richardmsong/aqua-scan-gate/pkg/aqua"
-	"github.com/richardmsong/aqua-scan-gate/pkg/imageref"
 	"github.com/richardmsong/aqua-scan-gate/pkg/tracing"
 )
 
@@ -206,18 +202,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create image resolver for resolving tags to digests
-	// Uses DefaultKeychain to inherit credentials from Docker config
-	imageResolver := imageref.NewResolver(remote.WithAuthFromKeychain(authn.DefaultKeychain))
-
 	// Setup Pod gate controller
+	// Note: Resolver is left nil - the controller builds a dynamic per-pod resolver
+	// that chains imagePullSecrets, ACR Workload Identity, and DefaultKeychain
 	if err = (&controller.PodGateReconciler{
 		Client:             mgr.GetClient(),
 		Scheme:             mgr.GetScheme(),
 		Recorder:           mgr.GetEventRecorderFor("aqua-scan-gate"),
 		ScanNamespace:      scanNamespace,
 		ExcludedNamespaces: excludedNS,
-		Resolver:           imageResolver,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "PodGate")
 		os.Exit(1)

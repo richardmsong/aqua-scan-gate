@@ -65,6 +65,8 @@ type PodGateReconciler struct {
 	ExcludedNamespaces map[string]bool
 	// Resolver resolves image tags to digests via registry lookups
 	Resolver ImageRefResolver
+	// VerboseAuth enables detailed authentication debugging logs
+	VerboseAuth bool
 }
 
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;update;patch
@@ -407,32 +409,77 @@ func (r *PodGateReconciler) mapImageScanToPods(ctx context.Context, obj client.O
 // 3. Fallback to DefaultKeychain (docker config)
 func (r *PodGateReconciler) buildResolverForPod(ctx context.Context, pod *corev1.Pod) (*imageref.Resolver, error) {
 	logger := log.FromContext(ctx)
-	var keychains []authn.Keychain
+
+	// Log workload identity environment if verbose auth is enabled
+	if r.VerboseAuth {
+		imageref.LogWorkloadIdentityEnv()
+	}
+
+	var namedKeychains []imageref.NamedKeychain
 
 	// 1. Pod + ServiceAccount imagePullSecrets
 	secrets, err := r.getImagePullSecrets(ctx, pod)
 	if err != nil {
 		logger.V(1).Info("Failed to get image pull secrets, continuing without", "error", err)
+		if r.VerboseAuth {
+			logger.Info("[AUTH-DEBUG] Failed to get image pull secrets", "error", err)
+		}
 	} else if len(secrets) > 0 {
 		k8sKeychain, err := k8sauthn.NewFromPullSecrets(ctx, secrets)
 		if err != nil {
 			logger.V(1).Info("Failed to create keychain from pull secrets, continuing without", "error", err)
+			if r.VerboseAuth {
+				logger.Info("[AUTH-DEBUG] Failed to create keychain from pull secrets", "error", err)
+			}
 		} else {
-			keychains = append(keychains, k8sKeychain)
+			if r.VerboseAuth {
+				logger.Info("[AUTH-DEBUG] Added imagePullSecrets keychain", "secretCount", len(secrets))
+			}
+			namedKeychains = append(namedKeychains, imageref.NamedKeychain{
+				Keychain: k8sKeychain,
+				Name:     "imagePullSecrets",
+			})
 		}
+	} else if r.VerboseAuth {
+		logger.Info("[AUTH-DEBUG] No imagePullSecrets found for pod", "pod", pod.Name)
 	}
 
 	// 2. ACR Workload Identity (auto-detected from env)
 	// Emulates the node pull account — the controller authenticates to ACR
 	// with its own identity, same as a node would via the credential provider.
 	acrKeychain := authn.NewKeychainFromHelper(credhelper.NewACRCredentialsHelper())
-	keychains = append(keychains, acrKeychain)
+	if r.VerboseAuth {
+		logger.Info("[AUTH-DEBUG] Added ACR Workload Identity keychain")
+	}
+	namedKeychains = append(namedKeychains, imageref.NamedKeychain{
+		Keychain: acrKeychain,
+		Name:     "ACR-WorkloadIdentity",
+	})
 
 	// 3. Fallback to DefaultKeychain (docker config)
-	keychains = append(keychains, authn.DefaultKeychain)
+	if r.VerboseAuth {
+		logger.Info("[AUTH-DEBUG] Added DefaultKeychain (docker config)")
+	}
+	namedKeychains = append(namedKeychains, imageref.NamedKeychain{
+		Keychain: authn.DefaultKeychain,
+		Name:     "DefaultKeychain",
+	})
+
+	// Build the multi-keychain with debug logging if enabled
+	var keychain authn.Keychain
+	if r.VerboseAuth {
+		keychain = imageref.NewDebugMultiKeychain(true, namedKeychains...)
+	} else {
+		// Use standard multi-keychain without debug overhead
+		var keychains []authn.Keychain
+		for _, nk := range namedKeychains {
+			keychains = append(keychains, nk.Keychain)
+		}
+		keychain = authn.NewMultiKeychain(keychains...)
+	}
 
 	return imageref.NewResolver(
-		remote.WithAuthFromKeychain(authn.NewMultiKeychain(keychains...)),
+		remote.WithAuthFromKeychain(keychain),
 	), nil
 }
 

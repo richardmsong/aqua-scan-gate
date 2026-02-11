@@ -205,6 +205,7 @@ func main() {
 	// Setup Pod gate controller
 	// Note: Resolver is left nil - the controller builds a dynamic per-pod resolver
 	// that chains imagePullSecrets, ACR Workload Identity, and DefaultKeychain
+	// Authentication debugging is available at V(2) log level (--zap-log-level=2)
 	if err = (&controller.PodGateReconciler{
 		Client:             mgr.GetClient(),
 		Scheme:             mgr.GetScheme(),

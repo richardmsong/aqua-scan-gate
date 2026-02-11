@@ -405,9 +405,15 @@ func (r *PodGateReconciler) mapImageScanToPods(ctx context.Context, obj client.O
 // 1. Pod + ServiceAccount imagePullSecrets
 // 2. ACR Workload Identity (auto-detected from env) - emulates node pull account
 // 3. Fallback to DefaultKeychain (docker config)
+//
+// Authentication debugging is available at V(2) log level. Enable with --zap-log-level=2.
 func (r *PodGateReconciler) buildResolverForPod(ctx context.Context, pod *corev1.Pod) (*imageref.Resolver, error) {
 	logger := log.FromContext(ctx)
-	var keychains []authn.Keychain
+
+	// Log workload identity environment at V(2) level
+	imageref.LogWorkloadIdentityEnv(logger)
+
+	var namedKeychains []imageref.NamedKeychain
 
 	// 1. Pod + ServiceAccount imagePullSecrets
 	secrets, err := r.getImagePullSecrets(ctx, pod)
@@ -418,21 +424,38 @@ func (r *PodGateReconciler) buildResolverForPod(ctx context.Context, pod *corev1
 		if err != nil {
 			logger.V(1).Info("Failed to create keychain from pull secrets, continuing without", "error", err)
 		} else {
-			keychains = append(keychains, k8sKeychain)
+			logger.V(2).Info("Added imagePullSecrets keychain", "secretCount", len(secrets))
+			namedKeychains = append(namedKeychains, imageref.NamedKeychain{
+				Keychain: k8sKeychain,
+				Name:     "imagePullSecrets",
+			})
 		}
+	} else {
+		logger.V(2).Info("No imagePullSecrets found for pod", "pod", pod.Name)
 	}
 
 	// 2. ACR Workload Identity (auto-detected from env)
 	// Emulates the node pull account — the controller authenticates to ACR
 	// with its own identity, same as a node would via the credential provider.
 	acrKeychain := authn.NewKeychainFromHelper(credhelper.NewACRCredentialsHelper())
-	keychains = append(keychains, acrKeychain)
+	logger.V(2).Info("Added ACR Workload Identity keychain")
+	namedKeychains = append(namedKeychains, imageref.NamedKeychain{
+		Keychain: acrKeychain,
+		Name:     "ACR-WorkloadIdentity",
+	})
 
 	// 3. Fallback to DefaultKeychain (docker config)
-	keychains = append(keychains, authn.DefaultKeychain)
+	logger.V(2).Info("Added DefaultKeychain (docker config)")
+	namedKeychains = append(namedKeychains, imageref.NamedKeychain{
+		Keychain: authn.DefaultKeychain,
+		Name:     "DefaultKeychain",
+	})
+
+	// Build the multi-keychain with debug logging (logs at V(2) level)
+	keychain := imageref.NewDebugMultiKeychain(logger, namedKeychains...)
 
 	return imageref.NewResolver(
-		remote.WithAuthFromKeychain(authn.NewMultiKeychain(keychains...)),
+		remote.WithAuthFromKeychain(keychain),
 	), nil
 }
 

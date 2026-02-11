@@ -4,102 +4,85 @@ package imageref
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"strings"
 
+	"github.com/go-logr/logr"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 )
 
-// DebugKeychain wraps a keychain and logs authentication attempts when verbose mode is enabled.
+// DebugKeychain wraps a keychain and logs authentication attempts at V(2) verbosity.
 // This is useful for debugging authentication issues with container registries.
+// To enable debug logging, use --zap-log-level=2 or --zap-log-level=debug.
 type DebugKeychain struct {
-	inner   authn.Keychain
-	name    string
-	verbose bool
+	inner  authn.Keychain
+	name   string
+	logger logr.Logger
 }
 
 // NewDebugKeychain creates a new debug keychain wrapper.
-// When verbose is true, it logs authentication attempts and results.
-func NewDebugKeychain(inner authn.Keychain, name string, verbose bool) authn.Keychain {
+// Authentication attempts and results are logged at V(2) verbosity level.
+func NewDebugKeychain(inner authn.Keychain, name string, logger logr.Logger) authn.Keychain {
 	return &DebugKeychain{
-		inner:   inner,
-		name:    name,
-		verbose: verbose,
+		inner:  inner,
+		name:   name,
+		logger: logger.WithName("auth-debug").WithValues("keychain", name),
 	}
 }
 
 // Resolve implements authn.Keychain.
 func (d *DebugKeychain) Resolve(target authn.Resource) (authn.Authenticator, error) {
-	if d.verbose {
-		log.Printf("[AUTH-DEBUG] [%s] Resolving credentials for: %s", d.name, target.String())
-	}
+	d.logger.V(2).Info("Resolving credentials", "target", target.String())
 
 	auth, err := d.inner.Resolve(target)
 	if err != nil {
-		if d.verbose {
-			log.Printf("[AUTH-DEBUG] [%s] Failed to resolve credentials for %s: %v", d.name, target.String(), err)
-		}
+		d.logger.V(2).Info("Failed to resolve credentials", "target", target.String(), "error", err)
 		return nil, err
 	}
 
 	if auth == authn.Anonymous {
-		if d.verbose {
-			log.Printf("[AUTH-DEBUG] [%s] Resolved to Anonymous for: %s", d.name, target.String())
-		}
+		d.logger.V(2).Info("Resolved to Anonymous", "target", target.String())
 		return auth, nil
 	}
 
 	// Wrap the authenticator to log when it's used
 	return &debugAuthenticator{
-		inner:        auth,
-		keychainName: d.name,
-		target:       target.String(),
-		verbose:      d.verbose,
+		inner:  auth,
+		target: target.String(),
+		logger: d.logger,
 	}, nil
 }
 
 // debugAuthenticator wraps an authenticator and logs when credentials are retrieved.
 type debugAuthenticator struct {
-	inner        authn.Authenticator
-	keychainName string
-	target       string
-	verbose      bool
+	inner  authn.Authenticator
+	target string
+	logger logr.Logger
 }
 
 // Authorization implements authn.Authenticator.
 func (d *debugAuthenticator) Authorization() (*authn.AuthConfig, error) {
-	if d.verbose {
-		log.Printf("[AUTH-DEBUG] [%s] Getting authorization for: %s", d.keychainName, d.target)
-	}
+	d.logger.V(2).Info("Getting authorization", "target", d.target)
 
 	cfg, err := d.inner.Authorization()
 	if err != nil {
-		if d.verbose {
-			log.Printf("[AUTH-DEBUG] [%s] Failed to get authorization for %s: %v", d.keychainName, d.target, err)
-		}
+		d.logger.V(2).Info("Failed to get authorization", "target", d.target, "error", err)
 		return nil, err
 	}
 
-	if d.verbose {
-		// Log credential info without exposing secrets
-		if cfg == nil {
-			log.Printf("[AUTH-DEBUG] [%s] Got nil AuthConfig for: %s", d.keychainName, d.target)
-		} else {
-			hasUsername := cfg.Username != ""
-			hasPassword := cfg.Password != ""
-			hasToken := cfg.RegistryToken != ""
-			hasIdentityToken := cfg.IdentityToken != ""
-
-			log.Printf("[AUTH-DEBUG] [%s] Got credentials for %s: username=%v, password=%v, token=%v, identityToken=%v",
-				d.keychainName, d.target, hasUsername, hasPassword, hasToken, hasIdentityToken)
-
-			if hasUsername {
-				// Log masked username
-				log.Printf("[AUTH-DEBUG] [%s] Username: %s", d.keychainName, maskCredential(cfg.Username))
-			}
-		}
+	// Log credential info without exposing secrets
+	if cfg == nil {
+		d.logger.V(2).Info("Got nil AuthConfig", "target", d.target)
+	} else {
+		d.logger.V(2).Info("Got credentials",
+			"target", d.target,
+			"hasUsername", cfg.Username != "",
+			"hasPassword", cfg.Password != "",
+			"hasToken", cfg.RegistryToken != "",
+			"hasIdentityToken", cfg.IdentityToken != "",
+			"maskedUsername", maskCredential(cfg.Username),
+		)
 	}
 
 	return cfg, nil
@@ -107,6 +90,9 @@ func (d *debugAuthenticator) Authorization() (*authn.AuthConfig, error) {
 
 // maskCredential masks a credential string for safe logging.
 func maskCredential(s string) string {
+	if s == "" {
+		return ""
+	}
 	if len(s) <= 4 {
 		return "****"
 	}
@@ -115,8 +101,10 @@ func maskCredential(s string) string {
 
 // LogWorkloadIdentityEnv logs Azure Workload Identity environment variables for debugging.
 // This helps diagnose issues with ACR authentication via workload identity.
-func LogWorkloadIdentityEnv() {
-	log.Println("[AUTH-DEBUG] === Azure Workload Identity Environment ===")
+// Logs are emitted at V(2) verbosity level.
+func LogWorkloadIdentityEnv(logger logr.Logger) {
+	l := logger.V(2).WithName("auth-debug")
+	l.Info("Azure Workload Identity environment check started")
 
 	envVars := []string{
 		"AZURE_CLIENT_ID",
@@ -128,51 +116,55 @@ func LogWorkloadIdentityEnv() {
 	for _, env := range envVars {
 		value := os.Getenv(env)
 		if value == "" {
-			log.Printf("[AUTH-DEBUG]   %s: <not set>", env)
+			l.Info("Environment variable not set", "var", env)
 		} else if env == "AZURE_FEDERATED_TOKEN_FILE" {
 			// Check if the file exists
 			if _, err := os.Stat(value); err == nil {
-				log.Printf("[AUTH-DEBUG]   %s: %s (file exists)", env, value)
 				// Log first few characters of token for debugging
 				if content, err := os.ReadFile(value); err == nil {
 					tokenLen := len(content)
-					log.Printf("[AUTH-DEBUG]   Token file size: %d bytes", tokenLen)
-					if tokenLen > 0 {
-						preview := string(content)
-						if len(preview) > 50 {
-							preview = preview[:50] + "..."
-						}
-						log.Printf("[AUTH-DEBUG]   Token preview: %s", preview)
+					preview := string(content)
+					if len(preview) > 50 {
+						preview = preview[:50] + "..."
 					}
+					l.Info("Token file found",
+						"var", env,
+						"path", value,
+						"tokenBytes", tokenLen,
+						"tokenPreview", preview,
+					)
+				} else {
+					l.Info("Token file found but unreadable", "var", env, "path", value, "error", err)
 				}
 			} else {
-				log.Printf("[AUTH-DEBUG]   %s: %s (FILE NOT FOUND: %v)", env, value, err)
+				l.Info("Token file not found", "var", env, "path", value, "error", err)
 			}
 		} else if strings.Contains(env, "CLIENT_ID") {
-			log.Printf("[AUTH-DEBUG]   %s: %s", env, maskCredential(value))
+			l.Info("Environment variable set", "var", env, "maskedValue", maskCredential(value))
 		} else {
-			log.Printf("[AUTH-DEBUG]   %s: %s", env, value)
+			l.Info("Environment variable set", "var", env, "value", value)
 		}
 	}
 
-	log.Println("[AUTH-DEBUG] =============================================")
+	l.Info("Azure Workload Identity environment check completed")
 }
 
 // LogResolverAttempt logs the start of a resolver attempt for an image.
-func LogResolverAttempt(image string, keychainNames []string) {
-	log.Printf("[AUTH-DEBUG] === Resolving image: %s ===", image)
-	log.Printf("[AUTH-DEBUG] Keychain order: %v", keychainNames)
+// Logs are emitted at V(2) verbosity level.
+func LogResolverAttempt(logger logr.Logger, image string, keychainNames []string) {
+	logger.V(2).WithName("auth-debug").Info("Resolving image", "image", image, "keychainOrder", keychainNames)
 }
 
 // DebugMultiKeychain wraps multiple keychains and logs which one succeeds.
 type DebugMultiKeychain struct {
 	keychains []authn.Keychain
 	names     []string
-	verbose   bool
+	logger    logr.Logger
 }
 
 // NewDebugMultiKeychain creates a multi-keychain wrapper with logging.
-func NewDebugMultiKeychain(verbose bool, keychains ...NamedKeychain) authn.Keychain {
+// Authentication attempts are logged at V(2) verbosity level.
+func NewDebugMultiKeychain(logger logr.Logger, keychains ...NamedKeychain) authn.Keychain {
 	var kcs []authn.Keychain
 	var names []string
 	for _, nk := range keychains {
@@ -182,7 +174,7 @@ func NewDebugMultiKeychain(verbose bool, keychains ...NamedKeychain) authn.Keych
 	return &DebugMultiKeychain{
 		keychains: kcs,
 		names:     names,
-		verbose:   verbose,
+		logger:    logger.WithName("auth-debug"),
 	}
 }
 
@@ -194,60 +186,48 @@ type NamedKeychain struct {
 
 // Resolve implements authn.Keychain.
 func (d *DebugMultiKeychain) Resolve(target authn.Resource) (authn.Authenticator, error) {
-	if d.verbose {
-		log.Printf("[AUTH-DEBUG] Resolving %s through %d keychains: %v", target.String(), len(d.keychains), d.names)
-	}
+	d.logger.V(2).Info("Resolving through keychains", "target", target.String(), "keychainCount", len(d.keychains), "keychains", d.names)
 
 	// Try each keychain in order
 	for i, kc := range d.keychains {
 		name := d.names[i]
-		if d.verbose {
-			log.Printf("[AUTH-DEBUG] Trying keychain [%d/%d]: %s", i+1, len(d.keychains), name)
-		}
+		d.logger.V(2).Info("Trying keychain", "index", i+1, "total", len(d.keychains), "keychain", name)
 
 		auth, err := kc.Resolve(target)
 		if err != nil {
-			if d.verbose {
-				log.Printf("[AUTH-DEBUG]   [%s] Error: %v", name, err)
-			}
+			d.logger.V(2).Info("Keychain error", "keychain", name, "error", err)
 			continue
 		}
 
 		if auth == authn.Anonymous {
-			if d.verbose {
-				log.Printf("[AUTH-DEBUG]   [%s] Returned Anonymous, trying next", name)
-			}
+			d.logger.V(2).Info("Keychain returned Anonymous, trying next", "keychain", name)
 			continue
 		}
 
 		// Check if this authenticator actually has credentials
 		cfg, err := auth.Authorization()
 		if err != nil {
-			if d.verbose {
-				log.Printf("[AUTH-DEBUG]   [%s] Error getting authorization: %v", name, err)
-			}
+			d.logger.V(2).Info("Error getting authorization", "keychain", name, "error", err)
 			continue
 		}
 
 		if cfg == nil || (cfg.Username == "" && cfg.Password == "" && cfg.RegistryToken == "" && cfg.IdentityToken == "") {
-			if d.verbose {
-				log.Printf("[AUTH-DEBUG]   [%s] Empty credentials, trying next", name)
-			}
+			d.logger.V(2).Info("Empty credentials, trying next", "keychain", name)
 			continue
 		}
 
-		if d.verbose {
-			log.Printf("[AUTH-DEBUG]   [%s] SUCCESS - found credentials", name)
-			log.Printf("[AUTH-DEBUG]   Credentials: username=%v, password=%v, token=%v, identityToken=%v",
-				cfg.Username != "", cfg.Password != "", cfg.RegistryToken != "", cfg.IdentityToken != "")
-		}
+		d.logger.V(2).Info("Keychain succeeded",
+			"keychain", name,
+			"hasUsername", cfg.Username != "",
+			"hasPassword", cfg.Password != "",
+			"hasToken", cfg.RegistryToken != "",
+			"hasIdentityToken", cfg.IdentityToken != "",
+		)
 
 		return auth, nil
 	}
 
-	if d.verbose {
-		log.Printf("[AUTH-DEBUG] No keychain provided credentials for %s, returning Anonymous", target.String())
-	}
+	d.logger.V(2).Info("No keychain provided credentials, returning Anonymous", "target", target.String())
 
 	return authn.Anonymous, nil
 }

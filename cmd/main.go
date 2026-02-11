@@ -57,9 +57,6 @@ func main() {
 	pflag.Duration("rescan-interval", 24*time.Hour, "Rescan interval (env: AQUA_RESCAN_INTERVAL)")
 	pflag.String("registry-mirrors", "", "Registry mirror mappings (env: AQUA_REGISTRY_MIRRORS)")
 
-	// Debug flags
-	pflag.Bool("verbose-auth", false, "Enable verbose authentication debugging (env: AQUA_VERBOSE_AUTH)")
-
 	// Webhook configuration
 	pflag.String("webhook-cert-path", "", "Directory containing webhook TLS certificates (env: AQUA_WEBHOOK_CERT_PATH)")
 
@@ -105,7 +102,6 @@ func main() {
 	scanNamespace := viper.GetString("scan-namespace")
 	rescanInterval := viper.GetDuration("rescan-interval")
 	registryMirrors := viper.GetString("registry-mirrors")
-	verboseAuth := viper.GetBool("verbose-auth")
 	webhookCertPath := viper.GetString("webhook-cert-path")
 	tracingEndpoint := viper.GetString("tracing-endpoint")
 	tracingProtocol := viper.GetString("tracing-protocol")
@@ -209,13 +205,13 @@ func main() {
 	// Setup Pod gate controller
 	// Note: Resolver is left nil - the controller builds a dynamic per-pod resolver
 	// that chains imagePullSecrets, ACR Workload Identity, and DefaultKeychain
+	// Authentication debugging is available at V(2) log level (--zap-log-level=2)
 	if err = (&controller.PodGateReconciler{
 		Client:             mgr.GetClient(),
 		Scheme:             mgr.GetScheme(),
 		Recorder:           mgr.GetEventRecorderFor("aqua-scan-gate"),
 		ScanNamespace:      scanNamespace,
 		ExcludedNamespaces: excludedNS,
-		VerboseAuth:        verboseAuth,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "PodGate")
 		os.Exit(1)

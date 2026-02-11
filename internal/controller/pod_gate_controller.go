@@ -220,7 +220,7 @@ func (r *PodGateReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 					Name:      scanName,
 					Namespace: scanNamespace,
 					Labels: map[string]string{
-						"security.example.com/image-hash": imageref.HashString(img.Image)[:16],
+						LabelImageHash: imageref.HashString(img.Image)[:16],
 					},
 				},
 				Spec: securityv1alpha1.ImageScanSpec{
@@ -386,8 +386,19 @@ func (r *PodGateReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
+// LabelImageHash is the label key used to store the image hash on ImageScan CRs.
+// This enables efficient matching between pods and ImageScans without needing
+// to resolve digests in the watch handler.
+const LabelImageHash = "scans.aquasec.community/image-hash"
+
 // mapImageScanToPods maps ImageScan changes to pods that reference the same image.
 // This enables efficient event-driven reconciliation instead of polling.
+//
+// Matching strategy: We match by the image-hash label on the ImageScan CR rather
+// than by ScanName. This avoids the mismatch that occurs when Reconcile() resolves
+// digests (producing sha256-based names) but ExtractFromPod returns raw tag-based
+// images (producing hash-based names). The image-hash label is computed from the
+// raw image string and is set when the ImageScan CR is created.
 func (r *PodGateReconciler) mapImageScanToPods(ctx context.Context, obj client.Object) []reconcile.Request {
 	imageScan, ok := obj.(*securityv1alpha1.ImageScan)
 	if !ok {
@@ -400,6 +411,18 @@ func (r *PodGateReconciler) mapImageScanToPods(ctx context.Context, obj client.O
 	if imageScan.Status.Phase != securityv1alpha1.ScanPhaseRegistered &&
 		imageScan.Status.Phase != securityv1alpha1.ScanPhaseError {
 		return nil
+	}
+
+	// Get the image-hash label from the ImageScan
+	// This label is set when the ImageScan CR is created and contains
+	// HashString(img.Image)[:16], which we can compute from raw pod images.
+	imageScanHash := ""
+	if imageScan.Labels != nil {
+		imageScanHash = imageScan.Labels[LabelImageHash]
+	}
+	if imageScanHash == "" {
+		// Fallback: compute hash from ImageScan.Spec.Image for older CRs without label
+		imageScanHash = imageref.HashString(imageScan.Spec.Image)[:16]
 	}
 
 	// List only pods with our scheduling gate using the field indexer
@@ -418,19 +441,25 @@ func (r *PodGateReconciler) mapImageScanToPods(ctx context.Context, obj client.O
 			continue
 		}
 
+		// Check namespace match first
+		scanNamespace := r.ScanNamespace
+		if scanNamespace == "" {
+			scanNamespace = pod.Namespace
+		}
+		if scanNamespace != imageScan.Namespace {
+			continue
+		}
+
 		// Check if this pod references the image from this ImageScan
+		// Match by image-hash: compute HashString(img.Image)[:16] for each pod image
+		// and compare against the ImageScan's image-hash label.
 		images := imageref.ExtractFromPod(&pod)
 		for _, img := range images {
-			scanName := imageref.ScanName(img)
-			scanNamespace := r.ScanNamespace
-			if scanNamespace == "" {
-				scanNamespace = pod.Namespace
-			}
-
-			// Match by name and namespace
-			if scanName == imageScan.Name && scanNamespace == imageScan.Namespace {
+			podImageHash := imageref.HashString(img.Image)[:16]
+			if podImageHash == imageScanHash {
 				logger.V(1).Info("Mapping ImageScan to pod",
 					"imageScan", imageScan.Name,
+					"imageHash", imageScanHash,
 					"pod", pod.Name,
 					"namespace", pod.Namespace)
 				requests = append(requests, reconcile.Request{

@@ -90,14 +90,36 @@ func HashString(s string) string {
 //   - "ghcr.io/org/app:v1" -> ("ghcr.io", "org/app")
 //   - "gcr.io/project/image@sha256:abc" -> ("gcr.io", "project/image")
 func ParseRegistryAndImage(image string) (registry, imageName string) {
+	registry, imageName, _ = ParseRegistryImageAndTag(image)
+	return registry, imageName
+}
+
+// ParseRegistryImageAndTag extracts the registry host, image name (repository path),
+// and tag or digest suffix from a full image reference.
+// The tagOrDigest includes the separator (: for tags, @ for digests).
+// For example:
+//   - "nginx:latest" -> ("index.docker.io", "library/nginx", ":latest")
+//   - "ghcr.io/org/app:v1" -> ("ghcr.io", "org/app", ":v1")
+//   - "gcr.io/project/image@sha256:abc" -> ("gcr.io", "project/image", "@sha256:abc")
+//   - "nginx" -> ("index.docker.io", "library/nginx", ":latest")
+func ParseRegistryImageAndTag(image string) (registry, imageName, tagOrDigest string) {
 	// Parse using go-containerregistry - it handles all the edge cases
 	ref, err := name.ParseReference(image)
 	if err != nil {
 		// Fallback: return as-is with empty registry on parse error
-		return "", image
+		return "", image, ""
 	}
 
 	registry = ref.Context().RegistryStr()
 	imageName = ref.Context().RepositoryStr()
-	return registry, imageName
+
+	// Extract the tag or digest suffix
+	switch r := ref.(type) {
+	case name.Tag:
+		tagOrDigest = ":" + r.TagStr()
+	case name.Digest:
+		tagOrDigest = "@" + r.DigestStr()
+	}
+
+	return registry, imageName, tagOrDigest
 }

@@ -343,7 +343,7 @@ func (r *PodGateReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // LabelImageHash is the label key used to store the image hash on ImageScan CRs.
 // This enables efficient matching between pods and ImageScans without needing
 // to resolve digests in the watch handler.
-const LabelImageHash = "security.example.com/image-hash"
+const LabelImageHash = "scans.aquasec.community/image-hash"
 
 // mapImageScanToPods maps ImageScan changes to pods that reference the same image.
 // This enables efficient event-driven reconciliation instead of polling.

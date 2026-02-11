@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -370,15 +371,14 @@ func (r *PodGateReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&corev1.Pod{}).
-		WithEventFilter(predicate.NewPredicateFuncs(func(obj client.Object) bool {
+		For(&corev1.Pod{}, builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
 			pod, ok := obj.(*corev1.Pod)
 			if !ok {
 				return false
 			}
 			// Only reconcile pods with our gate
 			return hasSchedulingGate(pod, SchedulingGateName)
-		})).
+		}))).
 		Watches(
 			&securityv1alpha1.ImageScan{},
 			handler.EnqueueRequestsFromMapFunc(r.mapImageScanToPods),

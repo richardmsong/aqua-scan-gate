@@ -300,3 +300,100 @@ func TestParseRegistryAndImage(t *testing.T) {
 		})
 	}
 }
+
+func TestParseRegistryImageAndTag(t *testing.T) {
+	tests := []struct {
+		name              string
+		image             string
+		expectedRegistry  string
+		expectedImage     string
+		expectedTagDigest string
+	}{
+		{
+			name:              "docker hub short name with tag",
+			image:             "nginx:latest",
+			expectedRegistry:  "index.docker.io",
+			expectedImage:     "library/nginx",
+			expectedTagDigest: ":latest",
+		},
+		{
+			name:              "docker hub with org and version tag",
+			image:             "myorg/myapp:v1",
+			expectedRegistry:  "index.docker.io",
+			expectedImage:     "myorg/myapp",
+			expectedTagDigest: ":v1",
+		},
+		{
+			name:              "ghcr.io image with tag",
+			image:             "ghcr.io/org/app:v1.2.3",
+			expectedRegistry:  "ghcr.io",
+			expectedImage:     "org/app",
+			expectedTagDigest: ":v1.2.3",
+		},
+		{
+			name:              "gcr.io image with semver tag",
+			image:             "gcr.io/project/image:v1.0.0",
+			expectedRegistry:  "gcr.io",
+			expectedImage:     "project/image",
+			expectedTagDigest: ":v1.0.0",
+		},
+		{
+			name:              "image with digest",
+			image:             "nginx@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abcd",
+			expectedRegistry:  "index.docker.io",
+			expectedImage:     "library/nginx",
+			expectedTagDigest: "@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abcd",
+		},
+		{
+			name:              "registry with port and tag",
+			image:             "registry.example.com:5000/myimage:v2.0",
+			expectedRegistry:  "registry.example.com:5000",
+			expectedImage:     "myimage",
+			expectedTagDigest: ":v2.0",
+		},
+		{
+			name:              "nested path with tag",
+			image:             "quay.io/org/team/app:v2",
+			expectedRegistry:  "quay.io",
+			expectedImage:     "org/team/app",
+			expectedTagDigest: ":v2",
+		},
+		{
+			name:              "azure container registry with tag",
+			image:             "myacr.azurecr.io/myapp:release-1.5",
+			expectedRegistry:  "myacr.azurecr.io",
+			expectedImage:     "myapp",
+			expectedTagDigest: ":release-1.5",
+		},
+		{
+			name:              "image without tag defaults to latest",
+			image:             "nginx",
+			expectedRegistry:  "index.docker.io",
+			expectedImage:     "library/nginx",
+			expectedTagDigest: ":latest",
+		},
+		{
+			name:              "gitlab registry with deep path and tag",
+			image:             "registry.gitlab.com/gitlab-org/build/cng/gitlab-base:v18.8.4",
+			expectedRegistry:  "registry.gitlab.com",
+			expectedImage:     "gitlab-org/build/cng/gitlab-base",
+			expectedTagDigest: ":v18.8.4",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			registry, imageName, tagOrDigest := ParseRegistryImageAndTag(tt.image)
+
+			if registry != tt.expectedRegistry {
+				t.Errorf("expected registry %q, got %q", tt.expectedRegistry, registry)
+			}
+			if imageName != tt.expectedImage {
+				t.Errorf("expected image %q, got %q", tt.expectedImage, imageName)
+			}
+			if tagOrDigest != tt.expectedTagDigest {
+				t.Errorf("expected tagOrDigest %q, got %q", tt.expectedTagDigest, tagOrDigest)
+			}
+		})
+	}
+}

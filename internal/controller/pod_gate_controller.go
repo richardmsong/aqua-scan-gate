@@ -321,15 +321,15 @@ func removeSchedulingGate(pod *corev1.Pod, gateName string) {
 
 // applyMirrorsToImageRef applies registry mirrors to an image reference for digest resolution.
 // It rewrites the registry portion of the image to point to a mirror while preserving the
-// image name structure. This is used for air-gapped environments where the controller
-// cannot reach upstream registries directly.
+// image name structure and the tag/digest suffix. This is used for air-gapped environments
+// where the controller cannot reach upstream registries directly.
 func (r *PodGateReconciler) applyMirrorsToImageRef(img imageref.ImageRef) imageref.ImageRef {
 	if len(r.RegistryMirrors) == 0 {
 		return img
 	}
 
-	// Parse the image to extract registry and image name
-	registry, imageName := imageref.ParseRegistryAndImage(img.Image)
+	// Parse the image to extract registry, image name, and tag/digest
+	registry, imageName, tagOrDigest := imageref.ParseRegistryImageAndTag(img.Image)
 
 	// Apply mirrors - returns the mirrored registry and adjusted image name
 	mirroredRegistry, adjustedImageName := aqua.ApplyRegistryMirror(registry, imageName, r.RegistryMirrors)
@@ -339,8 +339,8 @@ func (r *PodGateReconciler) applyMirrorsToImageRef(img imageref.ImageRef) imager
 		return img
 	}
 
-	// Reconstruct the full image reference with the mirrored registry
-	mirroredImage := mirroredRegistry + "/" + adjustedImageName
+	// Reconstruct the full image reference with the mirrored registry and tag/digest
+	mirroredImage := mirroredRegistry + "/" + adjustedImageName + tagOrDigest
 
 	return imageref.ImageRef{
 		Image:  mirroredImage,

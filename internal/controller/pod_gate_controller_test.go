@@ -806,7 +806,7 @@ var _ = Describe("PodGateReconciler", func() {
 		})
 
 		Context("when mirror matches the image registry", func() {
-			It("should rewrite ghcr.io to mirror", func() {
+			It("should rewrite ghcr.io to mirror preserving tag", func() {
 				r.RegistryMirrors = []aqua.RegistryMirror{
 					{Source: "ghcr.io", Mirror: "artifactory.corp.com/ghcr-remote"},
 				}
@@ -814,10 +814,10 @@ var _ = Describe("PodGateReconciler", func() {
 
 				result := r.applyMirrorsToImageRef(img)
 
-				Expect(result.Image).To(Equal("artifactory.corp.com/ghcr-remote/org/app"))
+				Expect(result.Image).To(Equal("artifactory.corp.com/ghcr-remote/org/app:latest"))
 			})
 
-			It("should rewrite docker.io to mirror", func() {
+			It("should rewrite docker.io to mirror preserving tag", func() {
 				r.RegistryMirrors = []aqua.RegistryMirror{
 					{Source: "docker.io", Mirror: "artifactory.corp.com/docker-remote"},
 				}
@@ -826,10 +826,10 @@ var _ = Describe("PodGateReconciler", func() {
 				result := r.applyMirrorsToImageRef(img)
 
 				// Docker Hub images get expanded to index.docker.io/library/...
-				Expect(result.Image).To(Equal("artifactory.corp.com/docker-remote/library/nginx"))
+				Expect(result.Image).To(Equal("artifactory.corp.com/docker-remote/library/nginx:latest"))
 			})
 
-			It("should rewrite gcr.io to mirror", func() {
+			It("should rewrite gcr.io to mirror preserving semver tag", func() {
 				r.RegistryMirrors = []aqua.RegistryMirror{
 					{Source: "gcr.io", Mirror: "artifactory.corp.com/gcr-remote"},
 				}
@@ -837,7 +837,29 @@ var _ = Describe("PodGateReconciler", func() {
 
 				result := r.applyMirrorsToImageRef(img)
 
-				Expect(result.Image).To(Equal("artifactory.corp.com/gcr-remote/project/image"))
+				Expect(result.Image).To(Equal("artifactory.corp.com/gcr-remote/project/image:v1.0.0"))
+			})
+
+			It("should preserve digest when rewriting registry (Issue #55)", func() {
+				r.RegistryMirrors = []aqua.RegistryMirror{
+					{Source: "ghcr.io", Mirror: "artifactory.corp.com/ghcr-remote"},
+				}
+				img := imageref.ImageRef{Image: "ghcr.io/org/app@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abcd"}
+
+				result := r.applyMirrorsToImageRef(img)
+
+				Expect(result.Image).To(Equal("artifactory.corp.com/ghcr-remote/org/app@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abcd"))
+			})
+
+			It("should preserve version tag when rewriting gitlab registry (Issue #55)", func() {
+				r.RegistryMirrors = []aqua.RegistryMirror{
+					{Source: "registry.gitlab.com", Mirror: "mirror.example.com"},
+				}
+				img := imageref.ImageRef{Image: "registry.gitlab.com/gitlab-org/build/cng/gitlab-base:v18.8.4"}
+
+				result := r.applyMirrorsToImageRef(img)
+
+				Expect(result.Image).To(Equal("mirror.example.com/gitlab-org/build/cng/gitlab-base:v18.8.4"))
 			})
 		})
 
@@ -855,7 +877,7 @@ var _ = Describe("PodGateReconciler", func() {
 		})
 
 		Context("when multiple mirrors are configured", func() {
-			It("should apply the matching mirror", func() {
+			It("should apply the matching mirror preserving tags", func() {
 				r.RegistryMirrors = []aqua.RegistryMirror{
 					{Source: "ghcr.io", Mirror: "artifactory.corp.com/ghcr-remote"},
 					{Source: "gcr.io", Mirror: "artifactory.corp.com/gcr-remote"},
@@ -864,16 +886,16 @@ var _ = Describe("PodGateReconciler", func() {
 
 				// Test ghcr.io
 				result := r.applyMirrorsToImageRef(imageref.ImageRef{Image: "ghcr.io/org/app:latest"})
-				Expect(result.Image).To(Equal("artifactory.corp.com/ghcr-remote/org/app"))
+				Expect(result.Image).To(Equal("artifactory.corp.com/ghcr-remote/org/app:latest"))
 
 				// Test gcr.io
 				result = r.applyMirrorsToImageRef(imageref.ImageRef{Image: "gcr.io/project/image:v1"})
-				Expect(result.Image).To(Equal("artifactory.corp.com/gcr-remote/project/image"))
+				Expect(result.Image).To(Equal("artifactory.corp.com/gcr-remote/project/image:v1"))
 			})
 		})
 
-		Context("when image has a digest", func() {
-			It("should preserve the digest in the result", func() {
+		Context("when ImageRef has a pre-resolved digest", func() {
+			It("should preserve both the tag in Image and the pre-resolved Digest field", func() {
 				r.RegistryMirrors = []aqua.RegistryMirror{
 					{Source: "ghcr.io", Mirror: "artifactory.corp.com/ghcr-remote"},
 				}
@@ -884,13 +906,13 @@ var _ = Describe("PodGateReconciler", func() {
 
 				result := r.applyMirrorsToImageRef(img)
 
-				Expect(result.Image).To(Equal("artifactory.corp.com/ghcr-remote/org/app"))
+				Expect(result.Image).To(Equal("artifactory.corp.com/ghcr-remote/org/app:latest"))
 				Expect(result.Digest).To(Equal("sha256:abc123"))
 			})
 		})
 
 		Context("when mirror has no path prefix", func() {
-			It("should not add extra slashes", func() {
+			It("should not add extra slashes and preserve tag", func() {
 				r.RegistryMirrors = []aqua.RegistryMirror{
 					{Source: "ghcr.io", Mirror: "registry.internal.com"},
 				}
@@ -898,7 +920,7 @@ var _ = Describe("PodGateReconciler", func() {
 
 				result := r.applyMirrorsToImageRef(img)
 
-				Expect(result.Image).To(Equal("registry.internal.com/org/app"))
+				Expect(result.Image).To(Equal("registry.internal.com/org/app:latest"))
 			})
 		})
 	})
@@ -927,10 +949,10 @@ var _ = Describe("PodGateReconciler", func() {
 					WithObjects(pod).
 					Build()
 
-				// The mock resolver will receive the mirrored image reference
-				// "artifactory.corp.com/ghcr-remote/org/app" and return a digest
+				// The mock resolver will receive the mirrored image reference WITH TAG preserved
+				// "artifactory.corp.com/ghcr-remote/org/app:latest" and return a digest
 				mockRes := newMockResolver()
-				mockRes.digests["artifactory.corp.com/ghcr-remote/org/app"] = "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+				mockRes.digests["artifactory.corp.com/ghcr-remote/org/app:latest"] = "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
 
 				recorder := record.NewFakeRecorder(10)
 				r := &PodGateReconciler{

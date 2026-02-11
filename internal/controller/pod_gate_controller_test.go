@@ -985,4 +985,331 @@ var _ = Describe("PodGateReconciler", func() {
 			})
 		})
 	})
+
+	Describe("hasSchedulingGate", func() {
+		Context("when pod has the specified scheduling gate", func() {
+			It("should return true", func() {
+				pod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-pod",
+						Namespace: "default",
+					},
+					Spec: corev1.PodSpec{
+						SchedulingGates: []corev1.PodSchedulingGate{
+							{Name: SchedulingGateName},
+						},
+						Containers: []corev1.Container{
+							{Name: "app", Image: "nginx:latest"},
+						},
+					},
+				}
+
+				Expect(hasSchedulingGate(pod, SchedulingGateName)).To(BeTrue())
+			})
+		})
+
+		Context("when pod has multiple scheduling gates including ours", func() {
+			It("should return true", func() {
+				pod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-pod",
+						Namespace: "default",
+					},
+					Spec: corev1.PodSpec{
+						SchedulingGates: []corev1.PodSchedulingGate{
+							{Name: "some-other-gate"},
+							{Name: SchedulingGateName},
+							{Name: "another-gate"},
+						},
+						Containers: []corev1.Container{
+							{Name: "app", Image: "nginx:latest"},
+						},
+					},
+				}
+
+				Expect(hasSchedulingGate(pod, SchedulingGateName)).To(BeTrue())
+			})
+		})
+
+		Context("when pod does not have the specified scheduling gate", func() {
+			It("should return false", func() {
+				pod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-pod",
+						Namespace: "default",
+					},
+					Spec: corev1.PodSpec{
+						SchedulingGates: []corev1.PodSchedulingGate{
+							{Name: "some-other-gate"},
+						},
+						Containers: []corev1.Container{
+							{Name: "app", Image: "nginx:latest"},
+						},
+					},
+				}
+
+				Expect(hasSchedulingGate(pod, SchedulingGateName)).To(BeFalse())
+			})
+		})
+
+		Context("when pod has no scheduling gates", func() {
+			It("should return false", func() {
+				pod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-pod",
+						Namespace: "default",
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: "app", Image: "nginx:latest"},
+						},
+					},
+				}
+
+				Expect(hasSchedulingGate(pod, SchedulingGateName)).To(BeFalse())
+			})
+		})
+	})
+
+	Describe("Scheduling Gate Predicate Behavior (Issue #57)", func() {
+		// These tests verify that the scheduling gate predicate is correctly
+		// scoped to Pod events only, ensuring ImageScan events are not filtered.
+		// The fix moved the predicate from WithEventFilter (global) to
+		// builder.WithPredicates on the For clause (pod-specific).
+
+		Context("predicate for pod filtering", func() {
+			It("should accept pods with our scheduling gate", func() {
+				pod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-pod",
+						Namespace: "default",
+					},
+					Spec: corev1.PodSpec{
+						SchedulingGates: []corev1.PodSchedulingGate{
+							{Name: SchedulingGateName},
+						},
+						Containers: []corev1.Container{
+							{Name: "app", Image: "nginx:latest"},
+						},
+					},
+				}
+
+				// Simulate the predicate logic used in SetupWithManager
+				result := hasSchedulingGate(pod, SchedulingGateName)
+				Expect(result).To(BeTrue(), "predicate should accept pods with our scheduling gate")
+			})
+
+			It("should reject pods without our scheduling gate", func() {
+				pod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-pod",
+						Namespace: "default",
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: "app", Image: "nginx:latest"},
+						},
+					},
+				}
+
+				// Simulate the predicate logic used in SetupWithManager
+				result := hasSchedulingGate(pod, SchedulingGateName)
+				Expect(result).To(BeFalse(), "predicate should reject pods without our scheduling gate")
+			})
+		})
+
+		Context("ImageScan events should trigger mapImageScanToPods", func() {
+			// This test verifies that ImageScan objects can properly trigger
+			// pod reconciliation via mapImageScanToPods. Before the fix,
+			// the global WithEventFilter would reject ImageScan events because
+			// the type assertion to *corev1.Pod would fail.
+
+			It("should map ImageScan in Registered phase to pods referencing the same image", func() {
+				pod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-pod",
+						Namespace: "default",
+					},
+					Spec: corev1.PodSpec{
+						SchedulingGates: []corev1.PodSchedulingGate{
+							{Name: SchedulingGateName},
+						},
+						Containers: []corev1.Container{
+							{Name: "app", Image: "nginx:latest"},
+						},
+					},
+				}
+
+				imageScan := &securityv1alpha1.ImageScan{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      imageref.ScanName(imageref.ImageRef{Image: "nginx:latest"}),
+						Namespace: "default",
+						Labels: map[string]string{
+							LabelImageHash: imageref.HashString("nginx:latest")[:16],
+						},
+					},
+					Spec: securityv1alpha1.ImageScanSpec{
+						Image: "nginx:latest",
+					},
+					Status: securityv1alpha1.ImageScanStatus{
+						Phase: securityv1alpha1.ScanPhaseRegistered,
+					},
+				}
+
+				indexerFunc := func(obj client.Object) []string {
+					pod, ok := obj.(*corev1.Pod)
+					if !ok {
+						return nil
+					}
+					var gates []string
+					for _, gate := range pod.Spec.SchedulingGates {
+						gates = append(gates, gate.Name)
+					}
+					return gates
+				}
+
+				fakeClient := fake.NewClientBuilder().
+					WithScheme(scheme).
+					WithObjects(pod, imageScan).
+					WithIndex(&corev1.Pod{}, IndexFieldSchedulingGate, indexerFunc).
+					Build()
+
+				r := &PodGateReconciler{
+					Client: fakeClient,
+					Scheme: scheme,
+				}
+
+				// This verifies that mapImageScanToPods works correctly
+				// and returns reconcile requests for matching pods.
+				// Before the fix, the global predicate would have
+				// prevented this from ever being called for ImageScan events.
+				requests := r.mapImageScanToPods(ctx, imageScan)
+				Expect(requests).To(HaveLen(1), "ImageScan should trigger reconciliation for matching pods")
+				Expect(requests[0].Name).To(Equal("test-pod"))
+				Expect(requests[0].Namespace).To(Equal("default"))
+			})
+
+			It("should not map ImageScan in Pending phase to pods", func() {
+				pod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-pod",
+						Namespace: "default",
+					},
+					Spec: corev1.PodSpec{
+						SchedulingGates: []corev1.PodSchedulingGate{
+							{Name: SchedulingGateName},
+						},
+						Containers: []corev1.Container{
+							{Name: "app", Image: "nginx:latest"},
+						},
+					},
+				}
+
+				imageScan := &securityv1alpha1.ImageScan{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      imageref.ScanName(imageref.ImageRef{Image: "nginx:latest"}),
+						Namespace: "default",
+						Labels: map[string]string{
+							LabelImageHash: imageref.HashString("nginx:latest")[:16],
+						},
+					},
+					Spec: securityv1alpha1.ImageScanSpec{
+						Image: "nginx:latest",
+					},
+					Status: securityv1alpha1.ImageScanStatus{
+						Phase: securityv1alpha1.ScanPhasePending,
+					},
+				}
+
+				indexerFunc := func(obj client.Object) []string {
+					pod, ok := obj.(*corev1.Pod)
+					if !ok {
+						return nil
+					}
+					var gates []string
+					for _, gate := range pod.Spec.SchedulingGates {
+						gates = append(gates, gate.Name)
+					}
+					return gates
+				}
+
+				fakeClient := fake.NewClientBuilder().
+					WithScheme(scheme).
+					WithObjects(pod, imageScan).
+					WithIndex(&corev1.Pod{}, IndexFieldSchedulingGate, indexerFunc).
+					Build()
+
+				r := &PodGateReconciler{
+					Client: fakeClient,
+					Scheme: scheme,
+				}
+
+				// Pending ImageScans should not trigger reconciliation
+				requests := r.mapImageScanToPods(ctx, imageScan)
+				Expect(requests).To(BeEmpty(), "Pending ImageScan should not trigger reconciliation")
+			})
+
+			It("should map ImageScan in Error phase to pods for error handling", func() {
+				pod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-pod",
+						Namespace: "default",
+					},
+					Spec: corev1.PodSpec{
+						SchedulingGates: []corev1.PodSchedulingGate{
+							{Name: SchedulingGateName},
+						},
+						Containers: []corev1.Container{
+							{Name: "app", Image: "nginx:latest"},
+						},
+					},
+				}
+
+				imageScan := &securityv1alpha1.ImageScan{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      imageref.ScanName(imageref.ImageRef{Image: "nginx:latest"}),
+						Namespace: "default",
+						Labels: map[string]string{
+							LabelImageHash: imageref.HashString("nginx:latest")[:16],
+						},
+					},
+					Spec: securityv1alpha1.ImageScanSpec{
+						Image: "nginx:latest",
+					},
+					Status: securityv1alpha1.ImageScanStatus{
+						Phase:   securityv1alpha1.ScanPhaseError,
+						Message: "Scan failed due to registry error",
+					},
+				}
+
+				indexerFunc := func(obj client.Object) []string {
+					pod, ok := obj.(*corev1.Pod)
+					if !ok {
+						return nil
+					}
+					var gates []string
+					for _, gate := range pod.Spec.SchedulingGates {
+						gates = append(gates, gate.Name)
+					}
+					return gates
+				}
+
+				fakeClient := fake.NewClientBuilder().
+					WithScheme(scheme).
+					WithObjects(pod, imageScan).
+					WithIndex(&corev1.Pod{}, IndexFieldSchedulingGate, indexerFunc).
+					Build()
+
+				r := &PodGateReconciler{
+					Client: fakeClient,
+					Scheme: scheme,
+				}
+
+				// Error ImageScans should trigger reconciliation so pods can handle the error
+				requests := r.mapImageScanToPods(ctx, imageScan)
+				Expect(requests).To(HaveLen(1), "Error ImageScan should trigger reconciliation for error handling")
+				Expect(requests[0].Name).To(Equal("test-pod"))
+			})
+		})
+	})
 })

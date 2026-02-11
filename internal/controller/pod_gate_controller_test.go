@@ -394,6 +394,54 @@ var _ = Describe("PodGateReconciler", func() {
 			})
 		})
 
+		Context("when ImageScan has digest-based name but pod has tag-based image (Issue #53)", func() {
+			It("should match via image-hash label instead of ScanName", func() {
+				// This test verifies the fix for the mapImageScanToPods bug where:
+				// - Reconcile() resolves tag -> digest, creates ImageScan with sha256-based name
+				// - mapImageScanToPods extracts raw tag-based image, generates img-<hash> name
+				// - Names don't match, watch never triggers
+
+				// Pod has a tag-based image
+				pod := createPodWithGate("test-pod", "default", "nginx:latest")
+
+				// ImageScan was created after digest resolution - name is sha256-based
+				// but it stores the original image in Spec.Image and has the image-hash label
+				testDigest := "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+				imageScan := &securityv1alpha1.ImageScan{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      imageref.ScanName(imageref.ImageRef{Image: "nginx:latest", Digest: testDigest}), // sha256-based name
+						Namespace: "default",
+						Labels: map[string]string{
+							LabelImageHash: imageref.HashString("nginx:latest")[:16], // image-hash label
+						},
+					},
+					Spec: securityv1alpha1.ImageScanSpec{
+						Image:  "nginx:latest",
+						Digest: testDigest,
+					},
+					Status: securityv1alpha1.ImageScanStatus{
+						Phase: securityv1alpha1.ScanPhaseRegistered,
+					},
+				}
+
+				fakeClient = fake.NewClientBuilder().
+					WithScheme(scheme).
+					WithObjects(pod, imageScan).
+					WithIndex(&corev1.Pod{}, IndexFieldSchedulingGate, indexerFunc).
+					Build()
+
+				r = &PodGateReconciler{
+					Client: fakeClient,
+					Scheme: scheme,
+				}
+
+				requests := r.mapImageScanToPods(ctx, imageScan)
+				Expect(requests).To(HaveLen(1), "should match pod via image-hash label even though ScanNames differ")
+				Expect(requests[0].Name).To(Equal("test-pod"))
+				Expect(requests[0].Namespace).To(Equal("default"))
+			})
+		})
+
 		Context("when using ScanNamespace configuration", func() {
 			It("should match pods to ImageScans in the configured namespace", func() {
 				// Pod in "app" namespace, but ImageScans are created in "scans" namespace

@@ -16,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	securityv1alpha1 "github.com/richardmsong/aqua-scan-gate/api/v1alpha1"
+	"github.com/richardmsong/aqua-scan-gate/pkg/aqua"
 	"github.com/richardmsong/aqua-scan-gate/pkg/imageref"
 )
 
@@ -732,6 +733,185 @@ var _ = Describe("PodGateReconciler", func() {
 				Expect(err).NotTo(HaveOccurred())
 				Expect(imageScanList.Items).To(HaveLen(1))
 				Expect(imageScanList.Items[0].Spec.Digest).To(Equal("sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"))
+			})
+		})
+	})
+
+	Describe("applyMirrorsToImageRef", func() {
+		var r *PodGateReconciler
+
+		BeforeEach(func() {
+			r = &PodGateReconciler{
+				Scheme: scheme,
+			}
+		})
+
+		Context("when no mirrors are configured", func() {
+			It("should return the image unchanged", func() {
+				r.RegistryMirrors = nil
+				img := imageref.ImageRef{Image: "ghcr.io/org/app:latest"}
+
+				result := r.applyMirrorsToImageRef(img)
+
+				Expect(result.Image).To(Equal("ghcr.io/org/app:latest"))
+			})
+		})
+
+		Context("when mirror matches the image registry", func() {
+			It("should rewrite ghcr.io to mirror", func() {
+				r.RegistryMirrors = []aqua.RegistryMirror{
+					{Source: "ghcr.io", Mirror: "artifactory.corp.com/ghcr-remote"},
+				}
+				img := imageref.ImageRef{Image: "ghcr.io/org/app:latest"}
+
+				result := r.applyMirrorsToImageRef(img)
+
+				Expect(result.Image).To(Equal("artifactory.corp.com/ghcr-remote/org/app"))
+			})
+
+			It("should rewrite docker.io to mirror", func() {
+				r.RegistryMirrors = []aqua.RegistryMirror{
+					{Source: "docker.io", Mirror: "artifactory.corp.com/docker-remote"},
+				}
+				img := imageref.ImageRef{Image: "nginx:latest"}
+
+				result := r.applyMirrorsToImageRef(img)
+
+				// Docker Hub images get expanded to index.docker.io/library/...
+				Expect(result.Image).To(Equal("artifactory.corp.com/docker-remote/library/nginx"))
+			})
+
+			It("should rewrite gcr.io to mirror", func() {
+				r.RegistryMirrors = []aqua.RegistryMirror{
+					{Source: "gcr.io", Mirror: "artifactory.corp.com/gcr-remote"},
+				}
+				img := imageref.ImageRef{Image: "gcr.io/project/image:v1.0.0"}
+
+				result := r.applyMirrorsToImageRef(img)
+
+				Expect(result.Image).To(Equal("artifactory.corp.com/gcr-remote/project/image"))
+			})
+		})
+
+		Context("when mirror does not match the image registry", func() {
+			It("should return the image unchanged", func() {
+				r.RegistryMirrors = []aqua.RegistryMirror{
+					{Source: "quay.io", Mirror: "artifactory.corp.com/quay-remote"},
+				}
+				img := imageref.ImageRef{Image: "ghcr.io/org/app:latest"}
+
+				result := r.applyMirrorsToImageRef(img)
+
+				Expect(result.Image).To(Equal("ghcr.io/org/app:latest"))
+			})
+		})
+
+		Context("when multiple mirrors are configured", func() {
+			It("should apply the matching mirror", func() {
+				r.RegistryMirrors = []aqua.RegistryMirror{
+					{Source: "ghcr.io", Mirror: "artifactory.corp.com/ghcr-remote"},
+					{Source: "gcr.io", Mirror: "artifactory.corp.com/gcr-remote"},
+					{Source: "docker.io", Mirror: "artifactory.corp.com/docker-remote"},
+				}
+
+				// Test ghcr.io
+				result := r.applyMirrorsToImageRef(imageref.ImageRef{Image: "ghcr.io/org/app:latest"})
+				Expect(result.Image).To(Equal("artifactory.corp.com/ghcr-remote/org/app"))
+
+				// Test gcr.io
+				result = r.applyMirrorsToImageRef(imageref.ImageRef{Image: "gcr.io/project/image:v1"})
+				Expect(result.Image).To(Equal("artifactory.corp.com/gcr-remote/project/image"))
+			})
+		})
+
+		Context("when image has a digest", func() {
+			It("should preserve the digest in the result", func() {
+				r.RegistryMirrors = []aqua.RegistryMirror{
+					{Source: "ghcr.io", Mirror: "artifactory.corp.com/ghcr-remote"},
+				}
+				img := imageref.ImageRef{
+					Image:  "ghcr.io/org/app:latest",
+					Digest: "sha256:abc123",
+				}
+
+				result := r.applyMirrorsToImageRef(img)
+
+				Expect(result.Image).To(Equal("artifactory.corp.com/ghcr-remote/org/app"))
+				Expect(result.Digest).To(Equal("sha256:abc123"))
+			})
+		})
+
+		Context("when mirror has no path prefix", func() {
+			It("should not add extra slashes", func() {
+				r.RegistryMirrors = []aqua.RegistryMirror{
+					{Source: "ghcr.io", Mirror: "registry.internal.com"},
+				}
+				img := imageref.ImageRef{Image: "ghcr.io/org/app:latest"}
+
+				result := r.applyMirrorsToImageRef(img)
+
+				Expect(result.Image).To(Equal("registry.internal.com/org/app"))
+			})
+		})
+	})
+
+	Describe("Reconcile with Registry Mirrors", func() {
+		Context("when resolver uses registry mirrors", func() {
+			It("should resolve digest through mirror but preserve original image in ImageScan", func() {
+				// Create a pod with our gate
+				pod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-pod",
+						Namespace: "default",
+					},
+					Spec: corev1.PodSpec{
+						SchedulingGates: []corev1.PodSchedulingGate{
+							{Name: SchedulingGateName},
+						},
+						Containers: []corev1.Container{
+							{Name: "app", Image: "ghcr.io/org/app:latest"},
+						},
+					},
+				}
+
+				fakeClient := fake.NewClientBuilder().
+					WithScheme(scheme).
+					WithObjects(pod).
+					Build()
+
+				// The mock resolver will receive the mirrored image reference
+				// "artifactory.corp.com/ghcr-remote/org/app" and return a digest
+				mockRes := newMockResolver()
+				mockRes.digests["artifactory.corp.com/ghcr-remote/org/app"] = "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+
+				recorder := record.NewFakeRecorder(10)
+				r := &PodGateReconciler{
+					Client:   fakeClient,
+					Scheme:   scheme,
+					Recorder: recorder,
+					Resolver: mockRes,
+					RegistryMirrors: []aqua.RegistryMirror{
+						{Source: "ghcr.io", Mirror: "artifactory.corp.com/ghcr-remote"},
+					},
+				}
+
+				_, err := r.Reconcile(ctx, reconcile.Request{
+					NamespacedName: types.NamespacedName{
+						Name:      "test-pod",
+						Namespace: "default",
+					},
+				})
+				Expect(err).NotTo(HaveOccurred())
+
+				// Verify ImageScan was created with the ORIGINAL image but resolved digest
+				var imageScanList securityv1alpha1.ImageScanList
+				err = fakeClient.List(ctx, &imageScanList)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(imageScanList.Items).To(HaveLen(1))
+				// Original image reference is preserved
+				Expect(imageScanList.Items[0].Spec.Image).To(Equal("ghcr.io/org/app:latest"))
+				// Digest was resolved through the mirror
+				Expect(imageScanList.Items[0].Spec.Digest).To(Equal("sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"))
 			})
 		})
 	})

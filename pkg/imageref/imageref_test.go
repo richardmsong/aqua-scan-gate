@@ -229,3 +229,74 @@ func TestExtractFromPod(t *testing.T) {
 		t.Errorf("expected image nginx:latest, got %q", result[0].Image)
 	}
 }
+
+func TestParseRegistryAndImage(t *testing.T) {
+	tests := []struct {
+		name             string
+		image            string
+		expectedRegistry string
+		expectedImage    string
+	}{
+		{
+			name:             "docker hub short name",
+			image:            "nginx:latest",
+			expectedRegistry: "index.docker.io",
+			expectedImage:    "library/nginx",
+		},
+		{
+			name:             "docker hub with org",
+			image:            "myorg/myapp:v1",
+			expectedRegistry: "index.docker.io",
+			expectedImage:    "myorg/myapp",
+		},
+		{
+			name:             "ghcr.io image",
+			image:            "ghcr.io/org/app:latest",
+			expectedRegistry: "ghcr.io",
+			expectedImage:    "org/app",
+		},
+		{
+			name:             "gcr.io image",
+			image:            "gcr.io/project/image:v1.0.0",
+			expectedRegistry: "gcr.io",
+			expectedImage:    "project/image",
+		},
+		{
+			name:             "image with digest",
+			image:            "nginx@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abcd",
+			expectedRegistry: "index.docker.io",
+			expectedImage:    "library/nginx",
+		},
+		{
+			name:             "registry with port",
+			image:            "registry.example.com:5000/myimage:latest",
+			expectedRegistry: "registry.example.com:5000",
+			expectedImage:    "myimage",
+		},
+		{
+			name:             "nested path",
+			image:            "quay.io/org/team/app:v2",
+			expectedRegistry: "quay.io",
+			expectedImage:    "org/team/app",
+		},
+		{
+			name:             "azure container registry",
+			image:            "myacr.azurecr.io/myapp:latest",
+			expectedRegistry: "myacr.azurecr.io",
+			expectedImage:    "myapp",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			registry, imageName := ParseRegistryAndImage(tt.image)
+
+			if registry != tt.expectedRegistry {
+				t.Errorf("expected registry %q, got %q", tt.expectedRegistry, registry)
+			}
+			if imageName != tt.expectedImage {
+				t.Errorf("expected image %q, got %q", tt.expectedImage, imageName)
+			}
+		})
+	}
+}

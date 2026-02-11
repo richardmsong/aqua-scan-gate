@@ -55,7 +55,8 @@ func main() {
 	pflag.String("excluded-namespaces", "kube-system,kube-public,cert-manager", "Namespaces to exclude (env: AQUA_EXCLUDED_NAMESPACES)")
 	pflag.String("scan-namespace", "", "Namespace for ImageScan CRs (env: AQUA_SCAN_NAMESPACE)")
 	pflag.Duration("rescan-interval", 24*time.Hour, "Rescan interval (env: AQUA_RESCAN_INTERVAL)")
-	pflag.String("registry-mirrors", "", "Registry mirror mappings (env: AQUA_REGISTRY_MIRRORS)")
+	pflag.String("registry-mirrors", "", "Registry mirror mappings for Aqua API (env: AQUA_REGISTRY_MIRRORS)")
+	pflag.String("resolver-registry-mirrors", "", "Registry mirror mappings for digest resolution (env: AQUA_RESOLVER_REGISTRY_MIRRORS)")
 
 	// Webhook configuration
 	pflag.String("webhook-cert-path", "", "Directory containing webhook TLS certificates (env: AQUA_WEBHOOK_CERT_PATH)")
@@ -102,6 +103,7 @@ func main() {
 	scanNamespace := viper.GetString("scan-namespace")
 	rescanInterval := viper.GetDuration("rescan-interval")
 	registryMirrors := viper.GetString("registry-mirrors")
+	resolverRegistryMirrors := viper.GetString("resolver-registry-mirrors")
 	webhookCertPath := viper.GetString("webhook-cert-path")
 	tracingEndpoint := viper.GetString("tracing-endpoint")
 	tracingProtocol := viper.GetString("tracing-protocol")
@@ -144,16 +146,29 @@ func main() {
 		}
 	}
 
-	// Parse registry mirrors
+	// Parse registry mirrors for Aqua API
 	mirrors, err := aqua.ParseRegistryMirrors(registryMirrors)
 	if err != nil {
 		setupLog.Error(err, "failed to parse registry mirrors")
 		os.Exit(1)
 	}
 	if len(mirrors) > 0 {
-		setupLog.Info("configured registry mirrors", "count", len(mirrors))
+		setupLog.Info("configured registry mirrors for Aqua API", "count", len(mirrors))
 		for _, m := range mirrors {
-			setupLog.Info("registry mirror", "source", m.Source, "mirror", m.Mirror)
+			setupLog.Info("registry mirror (Aqua API)", "source", m.Source, "mirror", m.Mirror)
+		}
+	}
+
+	// Parse registry mirrors for digest resolution
+	resolverMirrors, err := aqua.ParseRegistryMirrors(resolverRegistryMirrors)
+	if err != nil {
+		setupLog.Error(err, "failed to parse resolver registry mirrors")
+		os.Exit(1)
+	}
+	if len(resolverMirrors) > 0 {
+		setupLog.Info("configured registry mirrors for digest resolution", "count", len(resolverMirrors))
+		for _, m := range resolverMirrors {
+			setupLog.Info("registry mirror (resolver)", "source", m.Source, "mirror", m.Mirror)
 		}
 	}
 
@@ -212,6 +227,7 @@ func main() {
 		Recorder:           mgr.GetEventRecorderFor("aqua-scan-gate"),
 		ScanNamespace:      scanNamespace,
 		ExcludedNamespaces: excludedNS,
+		RegistryMirrors:    resolverMirrors,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "PodGate")
 		os.Exit(1)

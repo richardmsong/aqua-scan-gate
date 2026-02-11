@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	securityv1alpha1 "github.com/richardmsong/aqua-scan-gate/api/v1alpha1"
+	"github.com/richardmsong/aqua-scan-gate/pkg/aqua"
 	"github.com/richardmsong/aqua-scan-gate/pkg/imageref"
 	"github.com/richardmsong/aqua-scan-gate/pkg/tracing"
 )
@@ -65,6 +66,9 @@ type PodGateReconciler struct {
 	ExcludedNamespaces map[string]bool
 	// Resolver resolves image tags to digests via registry lookups
 	Resolver ImageRefResolver
+	// RegistryMirrors maps source registries to their mirrors for digest resolution
+	// in air-gapped environments. This is separate from the Aqua API mirrors.
+	RegistryMirrors []aqua.RegistryMirror
 }
 
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;update;patch
@@ -149,7 +153,16 @@ func (r *PodGateReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				),
 			)
 
-			resolved, err := resolver.ResolveImageRef(resolveCtx, img)
+			// Apply registry mirrors for digest resolution
+			// The mirrored image is used only for resolution; the original image is preserved
+			mirroredImg := r.applyMirrorsToImageRef(img)
+			if mirroredImg.Image != img.Image {
+				logger.V(1).Info("Applied registry mirror for resolution",
+					"original", img.Image, "mirrored", mirroredImg.Image)
+				resolveSpan.SetAttributes(attribute.String("mirrored_image", mirroredImg.Image))
+			}
+
+			resolved, err := resolver.ResolveImageRef(resolveCtx, mirroredImg)
 			if err != nil {
 				resolveSpan.RecordError(err)
 				resolveSpan.SetStatus(codes.Error, "Failed to resolve image digest")
@@ -166,7 +179,11 @@ func (r *PodGateReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			resolveSpan.SetAttributes(tracing.AttrImageDigest.String(resolved.Digest))
 			resolveSpan.End()
 			logger.V(1).Info("Resolved image digest", "image", img.Image, "digest", resolved.Digest)
-			images[i] = resolved
+			// Preserve the original image reference, only use the resolved digest
+			images[i] = imageref.ImageRef{
+				Image:  img.Image,
+				Digest: resolved.Digest,
+			}
 		}
 	}
 
@@ -300,6 +317,35 @@ func removeSchedulingGate(pod *corev1.Pod, gateName string) {
 		}
 	}
 	pod.Spec.SchedulingGates = filtered
+}
+
+// applyMirrorsToImageRef applies registry mirrors to an image reference for digest resolution.
+// It rewrites the registry portion of the image to point to a mirror while preserving the
+// image name structure. This is used for air-gapped environments where the controller
+// cannot reach upstream registries directly.
+func (r *PodGateReconciler) applyMirrorsToImageRef(img imageref.ImageRef) imageref.ImageRef {
+	if len(r.RegistryMirrors) == 0 {
+		return img
+	}
+
+	// Parse the image to extract registry and image name
+	registry, imageName := imageref.ParseRegistryAndImage(img.Image)
+
+	// Apply mirrors - returns the mirrored registry and adjusted image name
+	mirroredRegistry, adjustedImageName := aqua.ApplyRegistryMirror(registry, imageName, r.RegistryMirrors)
+
+	// If no change, return the original
+	if mirroredRegistry == registry && adjustedImageName == imageName {
+		return img
+	}
+
+	// Reconstruct the full image reference with the mirrored registry
+	mirroredImage := mirroredRegistry + "/" + adjustedImageName
+
+	return imageref.ImageRef{
+		Image:  mirroredImage,
+		Digest: img.Digest,
+	}
 }
 
 func (r *PodGateReconciler) SetupWithManager(mgr ctrl.Manager) error {

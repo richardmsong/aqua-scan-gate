@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/google/go-containerregistry/pkg/name"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -80,4 +81,23 @@ func ScanName(img ImageRef) string {
 func HashString(s string) string {
 	h := sha256.Sum256([]byte(s))
 	return fmt.Sprintf("%x", h)
+}
+
+// ParseRegistryAndImage extracts the registry host and the image name (repository path)
+// from a full image reference. It uses go-containerregistry for proper parsing.
+// For example:
+//   - "nginx:latest" -> ("index.docker.io", "library/nginx")
+//   - "ghcr.io/org/app:v1" -> ("ghcr.io", "org/app")
+//   - "gcr.io/project/image@sha256:abc" -> ("gcr.io", "project/image")
+func ParseRegistryAndImage(image string) (registry, imageName string) {
+	// Parse using go-containerregistry - it handles all the edge cases
+	ref, err := name.ParseReference(image)
+	if err != nil {
+		// Fallback: return as-is with empty registry on parse error
+		return "", image
+	}
+
+	registry = ref.Context().RegistryStr()
+	imageName = ref.Context().RepositoryStr()
+	return registry, imageName
 }

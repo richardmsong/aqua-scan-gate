@@ -1312,4 +1312,362 @@ var _ = Describe("PodGateReconciler", func() {
 			})
 		})
 	})
+
+	Describe("isNamespaceExcluded (Issue #59 - Whitelist Mode)", func() {
+		var r *PodGateReconciler
+
+		BeforeEach(func() {
+			r = &PodGateReconciler{
+				Scheme: scheme,
+			}
+		})
+
+		Context("when neither IncludedNamespaces nor ExcludedNamespaces are set", func() {
+			It("should not exclude any namespace (default behavior)", func() {
+				Expect(r.isNamespaceExcluded("default")).To(BeFalse())
+				Expect(r.isNamespaceExcluded("kube-system")).To(BeFalse())
+				Expect(r.isNamespaceExcluded("production")).To(BeFalse())
+			})
+		})
+
+		Context("when only ExcludedNamespaces is set (blacklist mode)", func() {
+			BeforeEach(func() {
+				r.ExcludedNamespaces = map[string]bool{
+					"kube-system": true,
+					"kube-public": true,
+				}
+			})
+
+			It("should exclude namespaces in the blacklist", func() {
+				Expect(r.isNamespaceExcluded("kube-system")).To(BeTrue())
+				Expect(r.isNamespaceExcluded("kube-public")).To(BeTrue())
+			})
+
+			It("should not exclude namespaces not in the blacklist", func() {
+				Expect(r.isNamespaceExcluded("default")).To(BeFalse())
+				Expect(r.isNamespaceExcluded("production")).To(BeFalse())
+			})
+		})
+
+		Context("when only IncludedNamespaces is set (whitelist mode)", func() {
+			BeforeEach(func() {
+				r.IncludedNamespaces = map[string]bool{
+					"staging":    true,
+					"production": true,
+				}
+			})
+
+			It("should not exclude namespaces in the whitelist", func() {
+				Expect(r.isNamespaceExcluded("staging")).To(BeFalse())
+				Expect(r.isNamespaceExcluded("production")).To(BeFalse())
+			})
+
+			It("should exclude namespaces not in the whitelist", func() {
+				Expect(r.isNamespaceExcluded("default")).To(BeTrue())
+				Expect(r.isNamespaceExcluded("kube-system")).To(BeTrue())
+				Expect(r.isNamespaceExcluded("development")).To(BeTrue())
+			})
+		})
+
+		Context("when both IncludedNamespaces and ExcludedNamespaces are set", func() {
+			BeforeEach(func() {
+				r.IncludedNamespaces = map[string]bool{
+					"staging":    true,
+					"production": true,
+				}
+				r.ExcludedNamespaces = map[string]bool{
+					"kube-system": true,
+					"staging":     true, // Intentionally overlap to test precedence
+				}
+			})
+
+			It("should use whitelist mode (IncludedNamespaces takes precedence)", func() {
+				// Whitelist mode: only staging and production are allowed
+				Expect(r.isNamespaceExcluded("staging")).To(BeFalse())
+				Expect(r.isNamespaceExcluded("production")).To(BeFalse())
+				// All others are excluded, even if not in ExcludedNamespaces
+				Expect(r.isNamespaceExcluded("default")).To(BeTrue())
+				Expect(r.isNamespaceExcluded("kube-system")).To(BeTrue())
+			})
+		})
+	})
+
+	Describe("mapImageScanToPods with IncludedNamespaces (Issue #59)", func() {
+		var (
+			fakeClient client.Client
+			r          *PodGateReconciler
+		)
+
+		indexerFunc := func(obj client.Object) []string {
+			pod, ok := obj.(*corev1.Pod)
+			if !ok {
+				return nil
+			}
+			var gates []string
+			for _, gate := range pod.Spec.SchedulingGates {
+				gates = append(gates, gate.Name)
+			}
+			return gates
+		}
+
+		createPodWithGate := func(name, namespace, image string) *corev1.Pod {
+			return &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      name,
+					Namespace: namespace,
+				},
+				Spec: corev1.PodSpec{
+					SchedulingGates: []corev1.PodSchedulingGate{
+						{Name: SchedulingGateName},
+					},
+					Containers: []corev1.Container{
+						{Name: "app", Image: image},
+					},
+				},
+			}
+		}
+
+		createImageScan := func(name, namespace, image string, phase securityv1alpha1.ScanPhase) *securityv1alpha1.ImageScan {
+			return &securityv1alpha1.ImageScan{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      name,
+					Namespace: namespace,
+					Labels: map[string]string{
+						LabelImageHash: imageref.HashString(image)[:16],
+					},
+				},
+				Spec: securityv1alpha1.ImageScanSpec{
+					Image: image,
+				},
+				Status: securityv1alpha1.ImageScanStatus{
+					Phase: phase,
+				},
+			}
+		}
+
+		Context("when IncludedNamespaces is set (whitelist mode)", func() {
+			It("should return requests only for pods in included namespaces", func() {
+				podInStaging := createPodWithGate("test-pod-staging", "staging", "nginx:latest")
+				podInProduction := createPodWithGate("test-pod-production", "production", "nginx:latest")
+				podInDefault := createPodWithGate("test-pod-default", "default", "nginx:latest")
+
+				// ImageScan in shared namespace
+				imageScan := createImageScan(
+					imageref.ScanName(imageref.ImageRef{Image: "nginx:latest"}),
+					"scans",
+					"nginx:latest",
+					securityv1alpha1.ScanPhaseRegistered,
+				)
+
+				fakeClient = fake.NewClientBuilder().
+					WithScheme(scheme).
+					WithObjects(podInStaging, podInProduction, podInDefault, imageScan).
+					WithIndex(&corev1.Pod{}, IndexFieldSchedulingGate, indexerFunc).
+					Build()
+
+				r = &PodGateReconciler{
+					Client:        fakeClient,
+					Scheme:        scheme,
+					ScanNamespace: "scans",
+					IncludedNamespaces: map[string]bool{
+						"staging":    true,
+						"production": true,
+					},
+				}
+
+				requests := r.mapImageScanToPods(ctx, imageScan)
+				// Should only include staging and production pods
+				Expect(requests).To(HaveLen(2))
+				names := []string{requests[0].Name, requests[1].Name}
+				Expect(names).To(ContainElements("test-pod-staging", "test-pod-production"))
+				Expect(names).NotTo(ContainElement("test-pod-default"))
+			})
+
+			It("should not return requests for pods not in the whitelist", func() {
+				podInDefault := createPodWithGate("test-pod-default", "default", "nginx:latest")
+				podInKubeSystem := createPodWithGate("test-pod-kube-system", "kube-system", "nginx:latest")
+
+				imageScan := createImageScan(
+					imageref.ScanName(imageref.ImageRef{Image: "nginx:latest"}),
+					"scans",
+					"nginx:latest",
+					securityv1alpha1.ScanPhaseRegistered,
+				)
+
+				fakeClient = fake.NewClientBuilder().
+					WithScheme(scheme).
+					WithObjects(podInDefault, podInKubeSystem, imageScan).
+					WithIndex(&corev1.Pod{}, IndexFieldSchedulingGate, indexerFunc).
+					Build()
+
+				r = &PodGateReconciler{
+					Client:        fakeClient,
+					Scheme:        scheme,
+					ScanNamespace: "scans",
+					IncludedNamespaces: map[string]bool{
+						"staging": true,
+					},
+				}
+
+				requests := r.mapImageScanToPods(ctx, imageScan)
+				Expect(requests).To(BeEmpty())
+			})
+		})
+	})
+
+	Describe("Reconcile with IncludedNamespaces (Issue #59)", func() {
+		Context("when pod is in an included namespace", func() {
+			It("should process the pod and create ImageScan", func() {
+				testDigest := "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+
+				pod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-pod",
+						Namespace: "staging",
+					},
+					Spec: corev1.PodSpec{
+						SchedulingGates: []corev1.PodSchedulingGate{
+							{Name: SchedulingGateName},
+						},
+						Containers: []corev1.Container{
+							{Name: "app", Image: "nginx:latest"},
+						},
+					},
+				}
+
+				fakeClient := fake.NewClientBuilder().
+					WithScheme(scheme).
+					WithObjects(pod).
+					Build()
+
+				mockRes := newMockResolver()
+				mockRes.digests["nginx:latest"] = testDigest
+
+				r := &PodGateReconciler{
+					Client:   fakeClient,
+					Scheme:   scheme,
+					Resolver: mockRes,
+					IncludedNamespaces: map[string]bool{
+						"staging": true,
+					},
+				}
+
+				_, err := r.Reconcile(ctx, reconcile.Request{
+					NamespacedName: types.NamespacedName{
+						Name:      "test-pod",
+						Namespace: "staging",
+					},
+				})
+				Expect(err).NotTo(HaveOccurred())
+
+				// Verify ImageScan was created
+				var imageScanList securityv1alpha1.ImageScanList
+				err = fakeClient.List(ctx, &imageScanList)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(imageScanList.Items).To(HaveLen(1))
+			})
+		})
+
+		Context("when pod is not in an included namespace", func() {
+			It("should skip the pod without creating ImageScan", func() {
+				pod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-pod",
+						Namespace: "default",
+					},
+					Spec: corev1.PodSpec{
+						SchedulingGates: []corev1.PodSchedulingGate{
+							{Name: SchedulingGateName},
+						},
+						Containers: []corev1.Container{
+							{Name: "app", Image: "nginx:latest"},
+						},
+					},
+				}
+
+				fakeClient := fake.NewClientBuilder().
+					WithScheme(scheme).
+					WithObjects(pod).
+					Build()
+
+				mockRes := newMockResolver()
+				mockRes.digests["nginx:latest"] = "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+
+				r := &PodGateReconciler{
+					Client:   fakeClient,
+					Scheme:   scheme,
+					Resolver: mockRes,
+					IncludedNamespaces: map[string]bool{
+						"staging": true,
+					},
+				}
+
+				_, err := r.Reconcile(ctx, reconcile.Request{
+					NamespacedName: types.NamespacedName{
+						Name:      "test-pod",
+						Namespace: "default",
+					},
+				})
+				Expect(err).NotTo(HaveOccurred())
+
+				// Verify no ImageScan was created
+				var imageScanList securityv1alpha1.ImageScanList
+				err = fakeClient.List(ctx, &imageScanList)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(imageScanList.Items).To(BeEmpty())
+			})
+		})
+
+		Context("when IncludedNamespaces is empty (blacklist mode fallback)", func() {
+			It("should process pods not in ExcludedNamespaces", func() {
+				testDigest := "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+
+				pod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-pod",
+						Namespace: "default",
+					},
+					Spec: corev1.PodSpec{
+						SchedulingGates: []corev1.PodSchedulingGate{
+							{Name: SchedulingGateName},
+						},
+						Containers: []corev1.Container{
+							{Name: "app", Image: "nginx:latest"},
+						},
+					},
+				}
+
+				fakeClient := fake.NewClientBuilder().
+					WithScheme(scheme).
+					WithObjects(pod).
+					Build()
+
+				mockRes := newMockResolver()
+				mockRes.digests["nginx:latest"] = testDigest
+
+				r := &PodGateReconciler{
+					Client:   fakeClient,
+					Scheme:   scheme,
+					Resolver: mockRes,
+					ExcludedNamespaces: map[string]bool{
+						"kube-system": true,
+					},
+				}
+
+				_, err := r.Reconcile(ctx, reconcile.Request{
+					NamespacedName: types.NamespacedName{
+						Name:      "test-pod",
+						Namespace: "default",
+					},
+				})
+				Expect(err).NotTo(HaveOccurred())
+
+				// Verify ImageScan was created (blacklist mode)
+				var imageScanList securityv1alpha1.ImageScanList
+				err = fakeClient.List(ctx, &imageScanList)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(imageScanList.Items).To(HaveLen(1))
+			})
+		})
+	})
 })

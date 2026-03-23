@@ -26,8 +26,11 @@ type PodMutator struct {
 	Client  client.Client
 	Decoder admission.Decoder
 
-	// ExcludedNamespaces won't have the gate added
+	// ExcludedNamespaces won't have the gate added (blacklist mode, used when IncludedNamespaces is empty)
 	ExcludedNamespaces map[string]bool
+
+	// IncludedNamespaces is the whitelist of namespaces to gate (when non-empty, overrides ExcludedNamespaces)
+	IncludedNamespaces map[string]bool
 
 	// ExcludedImages won't trigger gating (e.g., known-safe images)
 	ExcludedImages []string
@@ -54,11 +57,11 @@ func (m *PodMutator) Handle(ctx context.Context, req admission.Request) admissio
 		return admission.Errored(http.StatusBadRequest, err)
 	}
 
-	// Skip excluded namespaces
-	if m.ExcludedNamespaces[req.Namespace] {
+	// Check namespace filtering (whitelist mode takes precedence over blacklist mode)
+	if m.isNamespaceExcluded(req.Namespace) {
 		span.SetAttributes(attribute.Bool("excluded_namespace", true))
-		logger.V(1).Info("Skipping excluded namespace", "namespace", req.Namespace)
-		return admission.Allowed("excluded namespace")
+		logger.V(1).Info("Skipping namespace", "namespace", req.Namespace)
+		return admission.Allowed("namespace not in scope")
 	}
 
 	// Skip if bypass annotation is set
@@ -128,4 +131,14 @@ func (m *PodMutator) allImagesExcluded(pod *corev1.Pod) bool {
 	}
 
 	return true
+}
+
+// isNamespaceExcluded determines if a namespace should be skipped based on the filtering mode.
+// When IncludedNamespaces is non-empty (whitelist mode), only namespaces in the list are gated.
+// When IncludedNamespaces is empty (blacklist mode), namespaces in ExcludedNamespaces are skipped.
+func (m *PodMutator) isNamespaceExcluded(ns string) bool {
+	if len(m.IncludedNamespaces) > 0 {
+		return !m.IncludedNamespaces[ns] // whitelist mode
+	}
+	return m.ExcludedNamespaces[ns] // blacklist mode (default)
 }

@@ -63,8 +63,10 @@ type PodGateReconciler struct {
 	Recorder record.EventRecorder
 	// Namespace where ImageScan CRs are created (empty = same as pod)
 	ScanNamespace string
-	// Namespaces to exclude from scanning
+	// Namespaces to exclude from scanning (blacklist mode, used when IncludedNamespaces is empty)
 	ExcludedNamespaces map[string]bool
+	// IncludedNamespaces is the whitelist of namespaces to scan (when non-empty, overrides ExcludedNamespaces)
+	IncludedNamespaces map[string]bool
 	// Resolver resolves image tags to digests via registry lookups
 	Resolver ImageRefResolver
 	// RegistryMirrors maps source registries to their mirrors for digest resolution
@@ -89,8 +91,8 @@ func (r *PodGateReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	logger := log.FromContext(ctx)
 
-	// Skip excluded namespaces
-	if r.ExcludedNamespaces[req.Namespace] {
+	// Check namespace filtering (whitelist mode takes precedence over blacklist mode)
+	if r.isNamespaceExcluded(req.Namespace) {
 		span.SetAttributes(attribute.Bool("excluded_namespace", true))
 		return ctrl.Result{}, nil
 	}
@@ -320,6 +322,16 @@ func removeSchedulingGate(pod *corev1.Pod, gateName string) {
 	pod.Spec.SchedulingGates = filtered
 }
 
+// isNamespaceExcluded determines if a namespace should be skipped based on the filtering mode.
+// When IncludedNamespaces is non-empty (whitelist mode), only namespaces in the list are scanned.
+// When IncludedNamespaces is empty (blacklist mode), namespaces in ExcludedNamespaces are skipped.
+func (r *PodGateReconciler) isNamespaceExcluded(ns string) bool {
+	if len(r.IncludedNamespaces) > 0 {
+		return !r.IncludedNamespaces[ns] // whitelist mode
+	}
+	return r.ExcludedNamespaces[ns] // blacklist mode (default)
+}
+
 // applyMirrorsToImageRef applies registry mirrors to an image reference for digest resolution.
 // It rewrites the registry portion of the image to point to a mirror while preserving the
 // image name structure and the tag/digest suffix. This is used for air-gapped environments
@@ -436,8 +448,8 @@ func (r *PodGateReconciler) mapImageScanToPods(ctx context.Context, obj client.O
 
 	var requests []reconcile.Request
 	for _, pod := range podList.Items {
-		// Skip excluded namespaces
-		if r.ExcludedNamespaces[pod.Namespace] {
+		// Check namespace filtering (whitelist mode takes precedence over blacklist mode)
+		if r.isNamespaceExcluded(pod.Namespace) {
 			continue
 		}
 

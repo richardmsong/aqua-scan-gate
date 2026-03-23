@@ -53,6 +53,7 @@ func main() {
 	pflag.String("api-key", "", "Aqua API key (env: AQUA_API_KEY)")
 	pflag.String("hmac-secret", "", "HMAC secret for signing (env: AQUA_HMAC_SECRET)")
 	pflag.String("excluded-namespaces", "kube-system,kube-public,cert-manager", "Namespaces to exclude (env: AQUA_EXCLUDED_NAMESPACES)")
+	pflag.String("included-namespaces", "", "Namespaces to include (whitelist mode, overrides excluded-namespaces) (env: AQUA_INCLUDED_NAMESPACES)")
 	pflag.String("scan-namespace", "", "Namespace for ImageScan CRs (env: AQUA_SCAN_NAMESPACE)")
 	pflag.Duration("rescan-interval", 24*time.Hour, "Rescan interval (env: AQUA_RESCAN_INTERVAL)")
 	pflag.String("registry-mirrors", "", "Registry mirror mappings for Aqua API (env: AQUA_REGISTRY_MIRRORS)")
@@ -100,6 +101,7 @@ func main() {
 	aquaAPIKey := viper.GetString("api-key")
 	aquaHMACSecret := viper.GetString("hmac-secret")
 	excludedNamespaces := viper.GetString("excluded-namespaces")
+	includedNamespaces := viper.GetString("included-namespaces")
 	scanNamespace := viper.GetString("scan-namespace")
 	rescanInterval := viper.GetDuration("rescan-interval")
 	registryMirrors := viper.GetString("registry-mirrors")
@@ -144,6 +146,22 @@ func main() {
 		if ns != "" {
 			excludedNS[ns] = true
 		}
+	}
+
+	// Parse included namespaces (whitelist mode)
+	includedNS := make(map[string]bool)
+	for _, ns := range strings.Split(includedNamespaces, ",") {
+		ns = strings.TrimSpace(ns)
+		if ns != "" {
+			includedNS[ns] = true
+		}
+	}
+
+	// Log namespace filtering mode
+	if len(includedNS) > 0 {
+		setupLog.Info("namespace whitelist mode enabled", "namespaces", includedNamespaces)
+	} else if len(excludedNS) > 0 {
+		setupLog.Info("namespace blacklist mode enabled", "excluded", excludedNamespaces)
 	}
 
 	// Parse registry mirrors for Aqua API
@@ -227,6 +245,7 @@ func main() {
 		Recorder:           mgr.GetEventRecorderFor("aqua-scan-gate"),
 		ScanNamespace:      scanNamespace,
 		ExcludedNamespaces: excludedNS,
+		IncludedNamespaces: includedNS,
 		RegistryMirrors:    resolverMirrors,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "PodGate")
@@ -239,6 +258,7 @@ func main() {
 			Client:             mgr.GetClient(),
 			Decoder:            admission.NewDecoder(mgr.GetScheme()),
 			ExcludedNamespaces: excludedNS,
+			IncludedNamespaces: includedNS,
 		},
 	})
 
